@@ -247,7 +247,7 @@ final class RoomChatEngine {
     }
 
     private func reply(in tileID: UUID) {
-        var answer = RoomChatMessage(id: UUID(), kind: .assistant, author: "OpenAI", text: "", streaming: true)
+        var answer = RoomChatMessage(id: UUID(), kind: .assistant, author: RoomChatMessage.assistantAuthor, text: "", streaming: true)
         guard store.post(.chatMessage(tileID, answer)) else { return }
         replyTasks[tileID] = Task { [weak self] in
             do {

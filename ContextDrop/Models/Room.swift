@@ -424,8 +424,8 @@ struct RoomInvitationContext: Codable, Sendable {
 
 // MARK: - Wire
 
-/// One JSON message per `send` on the room session.
-struct RoomMessage: Codable, Sendable {
+/// One change to the room. Each is sent as one JSON message on the room session (see `RoomWire`).
+enum RoomMessage: Sendable, Equatable {
     static let currentVersion = 2
 
     enum Kind: String, Codable, Sendable {
@@ -436,9 +436,80 @@ struct RoomMessage: Codable, Sendable {
         case attachRun, runUpdate, runNote
     }
 
+    case hello(RoomMember)
+    case snapshot(RoomState)
+    /// The id of the member who left.
+    case memberLeft(String)
+    case ended
+
+    case addTile(RoomTile)
+    case moveTile(UUID, x: Double, y: Double, stamp: Date)
+    case editTile(UUID, text: String, stamp: Date)
+    case removeTile(UUID)
+    case setCollapsed(UUID, Bool, stamp: Date)
+
+    case chatMessage(UUID, RoomChatMessage)
+    /// The reply as it stands (the whole text so far, not an increment), so a lost or reordered batch
+    /// can't corrupt it. `streaming` is false on the last one.
+    case chatDelta(UUID, RoomChatMessage)
+
+    case addFile(UUID, RoomFile)
+    case fileStatus(UUID, fileID: UUID, RoomFile.Status)
+    /// `messageID` names the "x removed the file" line every Mac adds, so it is the same line everywhere.
+    /// `by` is who did it: stamped by the host from the peer's name, never taken from the sender's word.
+    case removeFile(UUID, fileID: UUID, messageID: UUID, by: String? = nil)
+    /// Asks the owner of chat `from` to send its files to the owner of the new chat `to`.
+    case requestFiles(from: UUID, to: UUID)
+
+    /// Adds a run to a chat. `messageID` and `by` as for `removeFile`.
+    case attachRun(UUID, to: UUID, messageID: UUID, by: String? = nil)
+    case runUpdate(UUID, RoomRunTile)
+    case runNote(UUID, RunNote)
+
+    var kind: Kind {
+        switch self {
+        case .hello: .hello
+        case .snapshot: .snapshot
+        case .memberLeft: .memberLeft
+        case .ended: .ended
+        case .addTile: .addTile
+        case .moveTile: .moveTile
+        case .editTile: .editTile
+        case .removeTile: .removeTile
+        case .setCollapsed: .setCollapsed
+        case .chatMessage: .chatMessage
+        case .chatDelta: .chatDelta
+        case .addFile: .addFile
+        case .fileStatus: .fileStatus
+        case .removeFile: .removeFile
+        case .requestFiles: .requestFiles
+        case .attachRun: .attachRun
+        case .runUpdate: .runUpdate
+        case .runNote: .runNote
+        }
+    }
+}
+
+enum RoomWireError: Error, CustomStringConvertible {
+    case payloadTooLarge(Int)
+    case unsupportedVersion(Int)
+    case missingPayload(RoomMessage.Kind)
+
+    var description: String {
+        switch self {
+        case .payloadTooLarge(let bytes): "payload too large (\(bytes) bytes)"
+        case .unsupportedVersion(let version): "unsupported room protocol version \(version)"
+        case .missingPayload(let kind): "missing payload for \(kind.rawValue)"
+        }
+    }
+}
+
+/// A room message as JSON (protocol version 2): a kind, plus whichever of these fields that kind uses.
+/// Adding a message means a case in `RoomMessage`, and its fields here in `init` and `message()`.
+private struct RoomWire: Codable {
     var version = RoomMessage.currentVersion
-    let kind: Kind
-    /// Who made the change. Stamped by the host from the peer's name, never taken from the sender's word.
+    let kind: RoomMessage.Kind
+    /// Who made the change (`by` in `RoomMessage`).
     var from: String?
     var member: RoomMember?
     var state: RoomState?
@@ -460,132 +531,104 @@ struct RoomMessage: Codable, Sendable {
     var runID: UUID?
     var run: RoomRunTile?
     var note: RunNote?
-
-    static func hello(_ member: RoomMember) -> RoomMessage { RoomMessage(kind: .hello, member: member) }
-    static func snapshot(_ state: RoomState) -> RoomMessage { RoomMessage(kind: .snapshot, state: state) }
-    static func memberLeft(_ id: String) -> RoomMessage { RoomMessage(kind: .memberLeft, memberID: id) }
-    static let ended = RoomMessage(kind: .ended)
-
-    static func addTile(_ tile: RoomTile) -> RoomMessage { RoomMessage(kind: .addTile, tile: tile) }
-    static func moveTile(_ id: UUID, x: Double, y: Double, stamp: Date) -> RoomMessage {
-        RoomMessage(kind: .moveTile, tileID: id, x: x, y: y, stamp: stamp)
-    }
-    static func editTile(_ id: UUID, text: String, stamp: Date) -> RoomMessage {
-        RoomMessage(kind: .editTile, tileID: id, text: text, stamp: stamp)
-    }
-    static func removeTile(_ id: UUID) -> RoomMessage { RoomMessage(kind: .removeTile, tileID: id) }
-    static func setCollapsed(_ id: UUID, _ collapsed: Bool, stamp: Date) -> RoomMessage {
-        RoomMessage(kind: .setCollapsed, tileID: id, stamp: stamp, flag: collapsed)
-    }
-
-    static func chatMessage(_ tileID: UUID, _ message: RoomChatMessage) -> RoomMessage {
-        RoomMessage(kind: .chatMessage, tileID: tileID, chat: message)
-    }
-    /// The reply as it stands (the whole text so far, not an increment), so a lost or reordered batch
-    /// can't corrupt it. `streaming` is false on the last one.
-    static func chatDelta(_ tileID: UUID, _ reply: RoomChatMessage) -> RoomMessage {
-        RoomMessage(kind: .chatDelta, tileID: tileID, chat: reply)
-    }
-
-    static func addFile(_ tileID: UUID, _ file: RoomFile) -> RoomMessage { RoomMessage(kind: .addFile, tileID: tileID, file: file) }
-    static func fileStatus(_ tileID: UUID, fileID: UUID, _ status: RoomFile.Status) -> RoomMessage {
-        RoomMessage(kind: .fileStatus, tileID: tileID, fileID: fileID, fileStatus: status)
-    }
-    /// `messageID` names the "x left the chat" line every Mac adds, so it is the same line everywhere.
-    static func removeFile(_ tileID: UUID, fileID: UUID, messageID: UUID) -> RoomMessage {
-        RoomMessage(kind: .removeFile, tileID: tileID, messageID: messageID, fileID: fileID)
-    }
-    /// Asks the owner of chat `source` to send its files to the owner of the new chat `target`.
-    static func requestFiles(from source: UUID, to target: UUID) -> RoomMessage {
-        RoomMessage(kind: .requestFiles, tileID: source, targetTileID: target)
-    }
-
-    /// `messageID` names the "run was added" line, as for `removeFile`.
-    static func attachRun(_ runID: UUID, to chatID: UUID, messageID: UUID) -> RoomMessage {
-        RoomMessage(kind: .attachRun, tileID: chatID, messageID: messageID, runID: runID)
-    }
-    static func runUpdate(_ tileID: UUID, _ run: RoomRunTile) -> RoomMessage { RoomMessage(kind: .runUpdate, tileID: tileID, run: run) }
-    static func runNote(_ tileID: UUID, _ note: RunNote) -> RoomMessage { RoomMessage(kind: .runNote, tileID: tileID, note: note) }
 }
 
-enum RoomWireError: Error, CustomStringConvertible {
-    case payloadTooLarge(Int)
-    case unsupportedVersion(Int)
-    case missingPayload(RoomMessage.Kind)
+extension RoomWire {
+    init(_ message: RoomMessage) {
+        self.init(kind: message.kind)
+        switch message {
+        case .hello(let value): member = value
+        case .snapshot(let value): state = value
+        case .memberLeft(let id): memberID = id
+        case .ended: break
+        case .addTile(let value): tile = value
+        case .moveTile(let id, let x, let y, let stamp): (tileID, self.x, self.y, self.stamp) = (id, x, y, stamp)
+        case .editTile(let id, let text, let stamp): (tileID, self.text, self.stamp) = (id, text, stamp)
+        case .removeTile(let id): tileID = id
+        case .setCollapsed(let id, let collapsed, let stamp): (tileID, flag, self.stamp) = (id, collapsed, stamp)
+        case .chatMessage(let id, let value), .chatDelta(let id, let value): (tileID, chat) = (id, value)
+        case .addFile(let id, let value): (tileID, file) = (id, value)
+        case .fileStatus(let id, let fileID, let status): (tileID, self.fileID, fileStatus) = (id, fileID, status)
+        case .removeFile(let id, let fileID, let messageID, let by): (tileID, self.fileID, self.messageID, from) = (id, fileID, messageID, by)
+        case .requestFiles(let source, let target): (tileID, targetTileID) = (source, target)
+        case .attachRun(let runID, let chatID, let messageID, let by): (tileID, self.runID, self.messageID, from) = (chatID, runID, messageID, by)
+        case .runUpdate(let id, let value): (tileID, run) = (id, value)
+        case .runNote(let id, let value): (tileID, note) = (id, value)
+        }
+    }
 
-    var description: String {
-        switch self {
-        case .payloadTooLarge(let bytes): "payload too large (\(bytes) bytes)"
-        case .unsupportedVersion(let version): "unsupported room protocol version \(version)"
-        case .missingPayload(let kind): "missing payload for \(kind.rawValue)"
+    /// The message this stands for, with everything cut down to size. Throws when a field its kind needs is missing.
+    func message() throws -> RoomMessage {
+        guard version == RoomMessage.currentVersion else { throw RoomWireError.unsupportedVersion(version) }
+        let missing = RoomWireError.missingPayload(kind)
+        let by = from.map(RoomLimits.name)
+        switch kind {
+        case .hello:
+            guard let member = member?.sanitized(), !member.id.isEmpty else { throw missing }
+            return .hello(member)
+        case .snapshot:
+            guard let state else { throw missing }
+            return .snapshot(state.sanitized())
+        case .memberLeft:
+            guard let memberID, !memberID.isEmpty else { throw missing }
+            return .memberLeft(RoomLimits.name(memberID))
+        case .ended:
+            return .ended
+        case .addTile:
+            guard let tile else { throw missing }
+            return .addTile(tile.sanitized())
+        case .moveTile:
+            guard let tileID, let x, let y, let stamp else { throw missing }
+            return .moveTile(tileID, x: RoomLimits.clampCoordinate(x), y: RoomLimits.clampCoordinate(y), stamp: RoomLimits.clampStamp(stamp))
+        case .editTile:
+            guard let tileID, let text, let stamp else { throw missing }
+            return .editTile(tileID, text: String(text.prefix(RoomLimits.maxTextLength)), stamp: RoomLimits.clampStamp(stamp))
+        case .removeTile:
+            guard let tileID else { throw missing }
+            return .removeTile(tileID)
+        case .setCollapsed:
+            guard let tileID, let flag, let stamp else { throw missing }
+            return .setCollapsed(tileID, flag, stamp: RoomLimits.clampStamp(stamp))
+        case .chatMessage:
+            guard let tileID, let chat else { throw missing }
+            return .chatMessage(tileID, chat.sanitized())
+        case .chatDelta:
+            guard let tileID, let chat else { throw missing }
+            return .chatDelta(tileID, chat.sanitized())
+        case .addFile:
+            guard let tileID, let file else { throw missing }
+            return .addFile(tileID, file.sanitized())
+        case .fileStatus:
+            guard let tileID, let fileID, let fileStatus else { throw missing }
+            return .fileStatus(tileID, fileID: fileID, fileStatus.sanitized())
+        case .removeFile:
+            guard let tileID, let fileID, let messageID else { throw missing }
+            return .removeFile(tileID, fileID: fileID, messageID: messageID, by: by)
+        case .requestFiles:
+            guard let tileID, let targetTileID else { throw missing }
+            return .requestFiles(from: tileID, to: targetTileID)
+        case .attachRun:
+            guard let tileID, let runID, let messageID else { throw missing }
+            return .attachRun(runID, to: tileID, messageID: messageID, by: by)
+        case .runUpdate:
+            guard let tileID, let run else { throw missing }
+            return .runUpdate(tileID, run.sanitized())
+        case .runNote:
+            guard let tileID, let note else { throw missing }
+            return .runNote(tileID, note.sanitized())
         }
     }
 }
 
 enum RoomCodec {
     static func encode(_ message: RoomMessage) throws -> Data {
-        try JSONEncoder().encode(message)
+        try JSONEncoder().encode(RoomWire(message))
     }
 
     /// Decodes, validates and size-limits. Throws on anything malformed; never traps.
     static func decode(_ data: Data) throws -> RoomMessage {
         guard data.count <= RoomLimits.maxPayloadBytes else { throw RoomWireError.payloadTooLarge(data.count) }
-        var message = try JSONDecoder().decode(RoomMessage.self, from: data)
-        guard message.version == RoomMessage.currentVersion else { throw RoomWireError.unsupportedVersion(message.version) }
-        let missing = RoomWireError.missingPayload(message.kind)
-        message.from = message.from.map(RoomLimits.name)
-        switch message.kind {
-        case .hello:
-            guard let member = message.member?.sanitized(), !member.id.isEmpty else { throw missing }
-            message.member = member
-        case .snapshot:
-            guard let state = message.state else { throw missing }
-            message.state = state.sanitized()
-        case .memberLeft:
-            guard let id = message.memberID, !id.isEmpty else { throw missing }
-            message.memberID = RoomLimits.name(id)
-        case .ended:
-            break
-        case .addTile:
-            guard let tile = message.tile else { throw missing }
-            message.tile = tile.sanitized()
-        case .moveTile:
-            guard message.tileID != nil, let x = message.x, let y = message.y, let stamp = message.stamp else { throw missing }
-            message.x = RoomLimits.clampCoordinate(x)
-            message.y = RoomLimits.clampCoordinate(y)
-            message.stamp = RoomLimits.clampStamp(stamp)
-        case .editTile:
-            guard message.tileID != nil, let text = message.text, let stamp = message.stamp else { throw missing }
-            message.text = String(text.prefix(RoomLimits.maxTextLength))
-            message.stamp = RoomLimits.clampStamp(stamp)
-        case .removeTile:
-            guard message.tileID != nil else { throw missing }
-        case .setCollapsed:
-            guard message.tileID != nil, message.flag != nil, let stamp = message.stamp else { throw missing }
-            message.stamp = RoomLimits.clampStamp(stamp)
-        case .chatMessage, .chatDelta:
-            guard message.tileID != nil, let chat = message.chat else { throw missing }
-            message.chat = chat.sanitized()
-        case .addFile:
-            guard message.tileID != nil, let file = message.file else { throw missing }
-            message.file = file.sanitized()
-        case .fileStatus:
-            guard message.tileID != nil, message.fileID != nil, let status = message.fileStatus else { throw missing }
-            message.fileStatus = status.sanitized()
-        case .removeFile:
-            guard message.tileID != nil, message.fileID != nil, message.messageID != nil else { throw missing }
-        case .requestFiles:
-            guard message.tileID != nil, message.targetTileID != nil else { throw missing }
-        case .attachRun:
-            guard message.tileID != nil, message.runID != nil, message.messageID != nil else { throw missing }
-        case .runUpdate:
-            guard message.tileID != nil, let run = message.run else { throw missing }
-            message.run = run.sanitized()
-        case .runNote:
-            guard message.tileID != nil, let note = message.note else { throw missing }
-            message.note = note.sanitized()
-        }
-        return message
+        return try JSONDecoder().decode(RoomWire.self, from: data).message()
     }
 
     static func encodeInvitation(_ invitation: RoomInvitation) -> Data? {

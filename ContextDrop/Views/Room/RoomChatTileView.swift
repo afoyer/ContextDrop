@@ -425,7 +425,7 @@ struct RoomChatMessageView: View, Equatable {
 
     /// "OpenAI · saw activity-pane.png, notes.pdf"
     private var assistantHeader: String {
-        var parts = ["OpenAI"]
+        var parts = [RoomChatMessage.assistantAuthor]
         if !message.sawFiles.isEmpty {
             let shown = message.sawFiles.prefix(3).joined(separator: ", ")
             let more = message.sawFiles.count > 3 ? " and \(message.sawFiles.count - 3) more" : ""

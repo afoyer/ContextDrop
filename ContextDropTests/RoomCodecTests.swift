@@ -14,9 +14,7 @@ final class RoomCodecTests: XCTestCase {
 
     func testAddTileRoundTrips() throws {
         let original = tile()
-        let decoded = try roundTrip(.addTile(original))
-        XCTAssertEqual(decoded.kind, .addTile)
-        XCTAssertEqual(decoded.tile, original)
+        XCTAssertEqual(try roundTrip(.addTile(original)), .addTile(original))
     }
 
     func testEveryKindRoundTripsWithItsPayload() throws {
@@ -41,14 +39,14 @@ final class RoomCodecTests: XCTestCase {
     }
 
     func testMissingPayloadIsRefused() throws {
-        let data = try JSONEncoder().encode(RoomMessage(kind: .moveTile, tileID: UUID()))
+        let data = Data(#"{"version":2,"kind":"moveTile","tileID":"\#(UUID().uuidString)"}"#.utf8)
         XCTAssertThrowsError(try RoomCodec.decode(data))
+        XCTAssertNoThrow(try RoomCodec.decode(Data(#"{"version":2,"kind":"removeTile","tileID":"\#(UUID().uuidString)"}"#.utf8)))
     }
 
     func testOtherVersionsAreRefused() throws {
-        var message = RoomMessage.removeTile(UUID())
-        message.version = RoomMessage.currentVersion + 1
-        XCTAssertThrowsError(try RoomCodec.decode(try JSONEncoder().encode(message)))
+        let data = Data(#"{"version":\#(RoomMessage.currentVersion + 1),"kind":"removeTile","tileID":"\#(UUID().uuidString)"}"#.utf8)
+        XCTAssertThrowsError(try RoomCodec.decode(data))
     }
 
     func testGarbageIsRefused() {
@@ -57,25 +55,33 @@ final class RoomCodecTests: XCTestCase {
 
     func testOversizedTextAndCoordinatesAreCutDown() throws {
         let long = String(repeating: "a", count: RoomLimits.maxTextLength + 50)
-        let decoded = try roundTrip(.addTile(tile(text: long, x: -9e12, y: 9e12)))
-        XCTAssertEqual(decoded.tile?.card?.text.count, RoomLimits.maxTextLength)
-        XCTAssertEqual(decoded.tile?.x, -RoomLimits.coordinateLimit)
-        XCTAssertEqual(decoded.tile?.y, RoomLimits.coordinateLimit)
+        guard case .addTile(let decoded) = try roundTrip(.addTile(tile(text: long, x: -9e12, y: 9e12))) else { return XCTFail("not a tile") }
+        XCTAssertEqual(decoded.card?.text.count, RoomLimits.maxTextLength)
+        XCTAssertEqual(decoded.x, -RoomLimits.coordinateLimit)
+        XCTAssertEqual(decoded.y, RoomLimits.coordinateLimit)
     }
 
     func testAStampFromTheFutureIsPulledBack() throws {
         let future = Date().addingTimeInterval(3_600)
-        let decoded = try roundTrip(.moveTile(UUID(), x: 0, y: 0, stamp: future))
-        XCTAssertLessThan(try XCTUnwrap(decoded.stamp), Date().addingTimeInterval(RoomLimits.maxClockSkew + 1))
+        guard case .moveTile(_, _, _, let stamp) = try roundTrip(.moveTile(UUID(), x: 0, y: 0, stamp: future)) else { return XCTFail("not a move") }
+        XCTAssertLessThan(stamp, Date().addingTimeInterval(RoomLimits.maxClockSkew + 1))
     }
 
     func testSnapshotDropsDuplicateTilesAndMembers() throws {
         let one = tile()
         let member = RoomMember(id: "Alice", name: "Alice", isHost: true)
         let state = RoomState(id: UUID(), name: "Table", hostName: "Alice", members: [member, member], tiles: [one, one])
-        let decoded = try roundTrip(.snapshot(state))
-        XCTAssertEqual(decoded.state?.tiles.count, 1)
-        XCTAssertEqual(decoded.state?.members.count, 1)
+        guard case .snapshot(let decoded) = try roundTrip(.snapshot(state)) else { return XCTFail("not a snapshot") }
+        XCTAssertEqual(decoded.tiles.count, 1)
+        XCTAssertEqual(decoded.members.count, 1)
+
+        // Who did it travels under the wire key `from`, and only where it is used.
+        let removal = RoomMessage.removeFile(UUID(), fileID: UUID(), messageID: UUID(), by: "Alice")
+        XCTAssertEqual(try roundTrip(removal), removal)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: RoomCodec.encode(removal)) as? [String: Any])
+        XCTAssertEqual(json["from"] as? String, "Alice")
+        XCTAssertEqual(json["version"] as? Int, RoomMessage.currentVersion)
+        XCTAssertEqual(json["kind"] as? String, "removeFile")
     }
 
     func testInvitationRoundTripsAndIsNotAPreview() {

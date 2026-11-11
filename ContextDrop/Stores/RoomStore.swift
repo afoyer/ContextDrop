@@ -47,7 +47,7 @@ final class RoomStore {
 
     private static let moveInterval: TimeInterval = 1.0 / 15
     private static let maxWatchLines = 400
-    static let untitledChat = "New chat"
+    static let untitledChat = RoomReducer.untitledChat
 
     init(peers: PeerService) {
         self.peers = peers
@@ -163,7 +163,7 @@ final class RoomStore {
         service.close(afterFlush: true)
         if keepForTakeHome, room?.tiles.isEmpty == false {
             stopWork()
-            settleStreams()
+            room?.settleStreams()
             ended = true
             notice = nil
         } else {
@@ -180,15 +180,6 @@ final class RoomStore {
         moveFlush = nil
         pendingMoves = [:]
         lastMoveSent = [:]
-    }
-
-    /// Nothing streams into a room that is over.
-    private func settleStreams() {
-        for i in room?.tiles.indices ?? 0..<0 {
-            guard case .chat(var chat) = room?.tiles[i].content, chat.isStreaming else { continue }
-            chat.stopStreaming()
-            room?.tiles[i].content = .chat(chat)
-        }
     }
 
     private func reset() {
@@ -208,7 +199,7 @@ final class RoomStore {
         isJoining = false
         joiningRoomID = nil
         if room != nil {
-            settleStreams()
+            room?.settleStreams()
             ended = true
         }
         notice = message
@@ -229,10 +220,9 @@ final class RoomStore {
     @discardableResult
     func post(_ message: RoomMessage) -> Bool {
         guard isActive else { return false }
-        var message = message
-        guard apply(&message, sender: localName) else { return false }
-        service.send(message)
-        afterApply(message)
+        guard let applied = apply(message, sender: localName) else { return false }
+        service.send(applied)
+        afterApply(applied)
         return true
     }
 
@@ -275,8 +265,7 @@ final class RoomStore {
         let x = RoomLimits.clampCoordinate(point.x), y = RoomLimits.clampCoordinate(point.y)
         guard tile.x != x || tile.y != y else { return }
         let now = Date()
-        var message = RoomMessage.moveTile(id, x: x, y: y, stamp: Self.stamp(after: tile.movedAt))
-        guard apply(&message, sender: localName) else { return }
+        guard let message = apply(.moveTile(id, x: x, y: y, stamp: Self.stamp(after: tile.movedAt)), sender: localName) else { return }
         if now.timeIntervalSince(lastMoveSent[id] ?? .distantPast) >= Self.moveInterval {
             lastMoveSent[id] = now
             pendingMoves[id] = nil
@@ -528,7 +517,7 @@ final class RoomStore {
         guard isActive else { return nil }
         let messages = conversation.messages.filter { $0.error == nil && !$0.text.isEmpty }.suffix(60).map { message in
             RoomChatMessage(id: UUID(), kind: message.role == .user ? .user : .assistant,
-                            author: message.role == .user ? localName : "OpenAI", text: message.text, createdAt: message.createdAt)
+                            author: message.role == .user ? localName : RoomChatMessage.assistantAuthor, text: message.text, createdAt: message.createdAt)
         }
         guard let id = addChatTile(title: conversation.title, messages: Array(messages)) else { return nil }
         for attachment in conversation.allAttachments.filter(\.isImage).prefix(RoomLimits.maxFilesPerChat) {
@@ -557,25 +546,9 @@ final class RoomStore {
     private func removeMember(_ id: String, relayExcept: MCPeerID?) {
         guard let index = room?.members.firstIndex(where: { $0.id == id && !$0.isHost }) else { return }
         room?.members.remove(at: index)
-        memberGone(id)
+        room?.memberGone(id)
         service.send(.memberLeft(id), except: relayExcept)
         onChange?()
-    }
-
-    /// Someone left: their runs can't report any more and their chats stop mid-answer.
-    private func memberGone(_ name: String) {
-        for i in room?.tiles.indices ?? 0..<0 {
-            switch room?.tiles[i].content {
-            case .run(var run) where run.ownerName == name && run.isLive:
-                run.state = .waiting("\(name) left the room, so this run is no longer reporting.")
-                room?.tiles[i].content = .run(run)
-            case .chat(var chat) where chat.ownerName == name && chat.isStreaming:
-                chat.stopStreaming()
-                room?.tiles[i].content = .chat(chat)
-            default:
-                break
-            }
-        }
     }
 
     // MARK: Incoming messages (already validated and size-limited by RoomCodec)
@@ -592,7 +565,7 @@ final class RoomStore {
         guard isActive, let room else { return }
         // The sender's identity is their peer name, never what the message claims.
         let sender = peerID.displayName
-        if message.kind == .hello {
+        if case .hello = message {
             if !room.members.contains(where: { $0.id == sender }) {
                 guard room.members.count < RoomLimits.maxMembers else { return }
                 let member = RoomMember(id: sender, name: sender, isHost: false)
@@ -605,22 +578,21 @@ final class RoomStore {
         }
         // Everything else only from people who are at the table.
         guard room.members.contains(where: { $0.id == sender && !$0.isHost }) else { return }
-        switch message.kind {
+        switch message {
         case .memberLeft:
             removeMember(sender, relayExcept: peerID)
         case .hello, .snapshot, .ended:
             break // only the host sends these
         default:
-            var message = message
-            guard apply(&message, sender: sender) else { return }
-            service.send(message, except: peerID)
-            afterApply(message)
+            guard let applied = apply(message, sender: sender) else { return }
+            service.send(applied, except: peerID)
+            afterApply(applied)
         }
     }
 
     private func handleAsGuest(_ message: RoomMessage) {
-        if message.kind == .snapshot {
-            guard var state = message.state, isJoining ? state.id == joiningRoomID : state.id == room?.id, !ended else { return }
+        if case .snapshot(var state) = message {
+            guard isJoining ? state.id == joiningRoomID : state.id == room?.id, !ended else { return }
             if !state.members.contains(where: { $0.id == localName }) {
                 state.members.append(RoomMember(id: localName, name: localName, isHost: false))
             }
@@ -631,16 +603,16 @@ final class RoomStore {
             return
         }
         guard isActive, let room else { return }
-        switch message.kind {
-        case .hello:
-            guard let member = message.member, room.members.count < RoomLimits.maxMembers,
+        switch message {
+        case .hello(let member):
+            guard room.members.count < RoomLimits.maxMembers,
                   !room.members.contains(where: { $0.id == member.id }) else { return }
             self.room?.members.append(RoomMember(id: member.id, name: member.name, isHost: false))
             onChange?()
-        case .memberLeft:
-            guard let id = message.memberID, id != localName else { return }
+        case .memberLeft(let id):
+            guard id != localName else { return }
             self.room?.members.removeAll { $0.id == id && !$0.isHost }
-            memberGone(id)
+            self.room?.memberGone(id)
             onChange?()
         case .ended:
             markEnded("\(room.hostName) ended the room.")
@@ -648,226 +620,26 @@ final class RoomStore {
             break
         default:
             // The host already checked it and stamped who it came from.
-            var message = message
-            if apply(&message, sender: nil) { afterApply(message) }
+            if let applied = apply(message, sender: nil) { afterApply(applied) }
         }
     }
 
     // MARK: Applying a change
 
-    private func index(_ id: UUID?) -> Int? {
-        guard let id else { return nil }
-        return room?.tiles.firstIndex { $0.id == id }
-    }
-
-    private func updateChat(at i: Int, _ body: (inout RoomChatTile) -> Bool) -> Bool {
-        guard case .chat(var chat) = room?.tiles[i].content, body(&chat) else { return false }
-        room?.tiles[i].content = .chat(chat)
-        return true
-    }
-
-    /// "Camille removed notes.pdf": built the same way on every Mac from who did it, never sent as text.
-    private static func eventLine(_ message: RoomMessage, _ what: String) -> String {
-        "\(message.from ?? "Someone") \(what)"
-    }
-
-    private static func append(_ message: RoomChatMessage, to chat: inout RoomChatTile) {
-        chat.messages.append(message)
-        if chat.messages.count > RoomLimits.maxChatMessages {
-            chat.messages.removeFirst(chat.messages.count - RoomLimits.maxChatMessages)
-        }
-    }
-
-    /// Applies one change to the local state. `sender` is who it came from (this Mac for local changes, the
-    /// peer's name on the host); the rules are checked against it and authorship is stamped into `message`
-    /// before it is relayed. `sender == nil` means the host already did both.
-    /// Returns false when the change was refused or is stale.
-    private func apply(_ message: inout RoomMessage, sender: String?) -> Bool {
-        guard let room else { return false }
-        if let sender { message.from = sender }
-        switch message.kind {
-        case .hello, .snapshot, .memberLeft, .ended:
-            return false
-
-        case .addTile:
-            guard var tile = message.tile, room.tiles.count < RoomLimits.maxTiles,
-                  !room.tiles.contains(where: { $0.id == tile.id }) else { return false }
-            if let sender {
-                // You can only add tiles that are yours: your card, a chat or a run on your own Mac.
-                tile.addedBy = sender
-                switch tile.content {
-                case .card:
-                    break
-                case .chat(var chat):
-                    chat.ownerName = sender
-                    for i in chat.messages.indices where chat.messages[i].kind == .user { chat.messages[i].author = sender }
-                    chat.stopStreaming()
-                    tile.content = .chat(chat)
-                case .run(var run):
-                    run.ownerName = sender
-                    run.notes = []
-                    tile.content = .run(run)
-                }
-                message.tile = tile
-            }
-            self.room?.tiles.append(tile)
+    /// Applies one change by the room's rules (`RoomReducer`). Returns the message to relay, with authorship
+    /// stamped, or nil when the change was refused or is stale.
+    private func apply(_ message: RoomMessage, sender: String?) -> RoomMessage? {
+        guard var state = room, let applied = RoomReducer.apply(message, to: &state, sender: sender) else { return nil }
+        room = state
+        switch applied {
+        case .addTile(let tile):
             if let run = tile.run { mergeLog(run.log, into: tile.id) }
-            return true
-
-        case .moveTile:
-            // Last write wins.
-            guard let i = index(message.tileID), let x = message.x, let y = message.y, let stamp = message.stamp,
-                  stamp > room.tiles[i].movedAt else { return false }
-            var moved = room.tiles[i]
-            moved.x = x
-            moved.y = y
-            moved.movedAt = stamp
-            self.room?.tiles[i] = moved
-            return true
-
-        case .editTile:
-            guard let i = index(message.tileID), let text = message.text, let stamp = message.stamp,
-                  case .card(var body) = room.tiles[i].content, stamp > room.tiles[i].updatedAt else { return false }
-            if let sender, room.tiles[i].addedBy != sender { return false }
-            body.text = text
-            self.room?.tiles[i].content = .card(body)
-            self.room?.tiles[i].updatedAt = stamp
-            return true
-
-        case .removeTile:
-            guard let i = index(message.tileID) else { return false }
-            let tile = room.tiles[i]
-            if let sender, tile.addedBy != sender, tile.ownerName != sender, room.hostName != sender { return false }
-            self.room?.tiles.remove(at: i)
-            return true
-
-        case .setCollapsed:
-            guard let i = index(message.tileID), let collapsed = message.flag, let stamp = message.stamp,
-                  stamp > room.tiles[i].updatedAt else { return false }
-            self.room?.tiles[i].collapsed = collapsed
-            self.room?.tiles[i].updatedAt = stamp
-            return true
-
-        case .chatMessage:
-            guard let i = index(message.tileID), var chat = message.chat, let tile = room.tiles[i].chat,
-                  !tile.messages.contains(where: { $0.id == chat.id }) else { return false }
-            if let sender {
-                if sender == tile.ownerName {
-                    // The owner's Mac speaks for the model, and for itself.
-                    switch chat.kind {
-                    case .user: chat.author = sender
-                    case .assistant: chat.author = "OpenAI"
-                    case .event: break
-                    }
-                } else {
-                    guard chat.kind == .user else { return false }
-                    chat.author = sender
-                    chat.streaming = false
-                    chat.failed = false
-                    chat.sawFiles = []
-                    chat.sawRuns = false
-                }
-                message.chat = chat
-            }
-            return updateChat(at: i) { tile in
-                if chat.kind == .user, tile.title == Self.untitledChat { tile.title = Conversation.title(from: chat.text) }
-                Self.append(chat, to: &tile)
-                return true
-            }
-
-        case .chatDelta:
-            guard let i = index(message.tileID), let reply = message.chat, let tile = room.tiles[i].chat else { return false }
-            if let sender, sender != tile.ownerName { return false }
-            return updateChat(at: i) { tile in
-                guard let j = tile.messages.firstIndex(where: { $0.id == reply.id && $0.kind == .assistant }) else { return false }
-                tile.messages[j].text = reply.text
-                tile.messages[j].streaming = reply.streaming
-                tile.messages[j].sawFiles = reply.sawFiles
-                tile.messages[j].sawRuns = reply.sawRuns
-                tile.messages[j].failed = reply.failed
-                return true
-            }
-
-        case .addFile:
-            guard let i = index(message.tileID), var file = message.file, let tile = room.tiles[i].chat,
-                  tile.files.count < RoomLimits.maxFilesPerChat, !tile.files.contains(where: { $0.id == file.id }) else { return false }
-            if let sender {
-                file.addedBy = sender
-                // Only the owner's Mac can say a file is ready.
-                file.status = .sending
-                message.file = file
-            }
-            return updateChat(at: i) { tile in
-                tile.files.append(file)
-                Self.append(RoomChatMessage(id: file.id, kind: .event, author: file.addedBy, text: "\(file.addedBy) added \(file.name)"), to: &tile)
-                return true
-            }
-
-        case .fileStatus:
-            guard let i = index(message.tileID), let fileID = message.fileID, let status = message.fileStatus,
-                  let tile = room.tiles[i].chat else { return false }
-            if let sender, sender != tile.ownerName { return false }
-            return updateChat(at: i) { tile in
-                guard let j = tile.files.firstIndex(where: { $0.id == fileID }) else { return false }
-                tile.files[j].status = status
-                return true
-            }
-
-        case .removeFile:
-            guard let i = index(message.tileID), let fileID = message.fileID, let eventID = message.messageID,
-                  let tile = room.tiles[i].chat, let file = tile.files.first(where: { $0.id == fileID }) else { return false }
-            if let sender, sender != file.addedBy, sender != tile.ownerName { return false }
-            let line = Self.eventLine(message, "removed \(file.name)")
-            return updateChat(at: i) { tile in
-                tile.files.removeAll { $0.id == fileID }
-                if !tile.messages.contains(where: { $0.id == eventID }) {
-                    Self.append(RoomChatMessage(id: eventID, kind: .event, author: "", text: line), to: &tile)
-                }
-                return true
-            }
-
-        case .requestFiles:
-            // Nothing changes here; the owner of the source chat acts on it (see `afterApply`).
-            guard let source = index(message.tileID), room.tiles[source].chat != nil,
-                  let target = index(message.targetTileID), let chat = room.tiles[target].chat else { return false }
-            if let sender, sender != chat.ownerName { return false }
-            return true
-
-        case .attachRun:
-            guard let i = index(message.tileID), let runID = message.runID, let run = tile(runID)?.run,
-                  let tile = room.tiles[i].chat, !tile.runIDs.contains(runID), tile.runIDs.count < RoomLimits.maxRunsPerChat else { return false }
-            let line = Self.eventLine(message, "added \(run.ownerName)’s run “\(run.title)”")
-            return updateChat(at: i) { tile in
-                tile.runIDs.append(runID)
-                if let eventID = message.messageID, !tile.messages.contains(where: { $0.id == eventID }) {
-                    Self.append(RoomChatMessage(id: eventID, kind: .event, author: "", text: line), to: &tile)
-                }
-                return true
-            }
-
-        case .runUpdate:
-            guard let i = index(message.tileID), var run = message.run, let current = room.tiles[i].run else { return false }
-            if let sender, sender != current.ownerName { return false }
-            // Who owns it and the notes people left belong to the room, not to the update.
-            run.ownerName = current.ownerName
-            run.notes = current.notes
-            message.run = run
-            self.room?.tiles[i].content = .run(run)
-            mergeLog(run.log, into: room.tiles[i].id)
-            return true
-
-        case .runNote:
-            guard let i = index(message.tileID), var note = message.note, case .run(var run) = room.tiles[i].content,
-                  !run.notes.contains(where: { $0.id == note.id }) else { return false }
-            if let sender {
-                note.from = sender
-                message.note = note
-            }
-            run.notes.append(note)
-            if run.notes.count > RoomLimits.maxRunNotes { run.notes.removeFirst(run.notes.count - RoomLimits.maxRunNotes) }
-            self.room?.tiles[i].content = .run(run)
-            return true
+        case .runUpdate(let id, let run):
+            mergeLog(run.log, into: id)
+        default:
+            break
         }
+        return applied
     }
 
     private func mergeLog(_ lines: [RunLogLine], into tileID: UUID) {
@@ -882,29 +654,25 @@ final class RoomStore {
 
     /// What this Mac does because of a change (as the owner of a chat or a run).
     private func afterApply(_ message: RoomMessage) {
-        switch message.kind {
-        case .chatMessage:
-            guard let id = message.tileID, message.chat?.kind == .user, tile(id)?.chat?.ownerName == localName else { return }
+        switch message {
+        case .chatMessage(let id, let chat):
+            guard chat.kind == .user, tile(id)?.chat?.ownerName == localName else { return }
             engine.userMessageArrived(id)
-        case .addFile:
-            guard let id = message.tileID, let file = message.file, tile(id)?.chat?.ownerName == localName,
-                  file.addedBy != localName else { return }
+        case .addFile(let id, let file):
+            guard tile(id)?.chat?.ownerName == localName, file.addedBy != localName else { return }
             engine.expectFile(file.id, in: id)
-        case .removeFile:
-            if let fileID = message.fileID { engine.forgetFile(fileID) }
-        case .requestFiles:
-            guard let source = message.tileID, let target = message.targetTileID,
-                  tile(source)?.chat?.ownerName == localName else { return }
+        case .removeFile(_, let fileID, _, _):
+            engine.forgetFile(fileID)
+        case .requestFiles(let source, let target):
+            guard tile(source)?.chat?.ownerName == localName else { return }
             engine.sendFiles(from: source, to: target)
-        case .removeTile:
-            guard let id = message.tileID else { return }
+        case .removeTile(let id):
             engine.tileRemoved(id)
             runs.tileRemoved(id)
             runLogs[id] = nil
             chatDrafts[id] = nil
-        case .runNote:
-            guard let id = message.tileID, let note = message.note, let run = tile(id)?.run,
-                  run.ownerName == localName, note.from != localName else { return }
+        case .runNote(let id, let note):
+            guard let run = tile(id)?.run, run.ownerName == localName, note.from != localName else { return }
             notice = "\(note.from) about “\(run.title)”: \(note.text)"
         default:
             break
