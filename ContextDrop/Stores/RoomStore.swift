@@ -388,7 +388,7 @@ final class RoomStore {
             + sources.compactMap(\.chat).flatMap(\.runIDs)
         var seenRuns = Set<UUID>()
 
-        let title = question.isEmpty ? Self.untitledChat : ChatStore.title(from: question)
+        let title = question.isEmpty ? Self.untitledChat : Conversation.title(from: question)
         var messages: [RoomChatMessage] = []
         if !question.isEmpty { messages.append(RoomChatMessage(id: UUID(), kind: .user, author: localName, text: question)) }
         guard let id = addChatTile(title: title, messages: messages, files: files,
@@ -770,7 +770,7 @@ final class RoomStore {
                 message.chat = chat
             }
             return updateChat(at: i) { tile in
-                if chat.kind == .user, tile.title == Self.untitledChat { tile.title = ChatStore.title(from: chat.text) }
+                if chat.kind == .user, tile.title == Self.untitledChat { tile.title = Conversation.title(from: chat.text) }
                 Self.append(chat, to: &tile)
                 return true
             }

@@ -252,7 +252,7 @@ struct SharePrepareView: View {
             Text("What they will get").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
             ScrollView {
                 if let conversation {
-                    SharePreviewCard(share: model.store.buildShare(from: prep, conversation: conversation, id: prep.previewID, createdAt: prep.startedAt), placeholder: prep.phase == .summarizing)
+                    SharePreviewCard(share: prep.share(of: conversation, from: model.store.peers, id: prep.previewID, createdAt: prep.startedAt), placeholder: prep.phase == .summarizing)
                         .animation(Motion.streaming(model.reduceMotion), value: prep.summary)
                 }
             }

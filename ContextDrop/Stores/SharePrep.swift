@@ -71,6 +71,29 @@ final class SharePrep {
         phase = .ready
     }
 
+    /// The share as it stands. `id` and `createdAt` are fixed for the live preview, so it isn't a new share on every render.
+    func share(of conversation: Conversation, from peers: PeerService, id: UUID = UUID(), createdAt: Date = Date()) -> ShareSummary {
+        ShareSummary(
+            id: id,
+            title: title.isEmpty ? conversation.title : title,
+            senderName: peers.localDisplayName,
+            senderDevice: peers.localDevice,
+            createdAt: createdAt,
+            summary: summary.trimmingCharacters(in: .whitespacesAndNewlines),
+            kept: kept,
+            decisions: decisions.filter(\.included).map(\.value),
+            openQuestions: questions.filter(\.included).map(\.value),
+            notes: notes.filter(\.included).map(\.value),
+            fileNames: includeFileNames ? conversation.referencedFileNames : [],
+            transcript: includeTranscript
+                ? conversation.messages.filter { $0.error == nil && !$0.text.isEmpty }.map { TranscriptLine(author: $0.author, text: $0.text) }
+                : nil,
+            keyFacts: facts.filter(\.included).map(\.value),
+            nextSteps: nextSteps.filter(\.included).map(\.value),
+            images: includeScreenshots ? sharedImages : nil
+        )
+    }
+
     var rows: [Row] {
         var rows: [Row] = [.summary]
         rows += kept.map { .kept($0.id) }

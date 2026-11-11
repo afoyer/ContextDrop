@@ -124,10 +124,9 @@ final class TextToolsTests: XCTestCase {
         XCTAssertFalse(OpenAIClient.isReasoningModel("gpt-4.1-mini"))
     }
 
-    @MainActor
     func testChatTitleIsTheFirstSixWords() {
-        XCTAssertEqual(ChatStore.title(from: "why does the build fail on my other mac today?"), "Why does the build fail on")
-        XCTAssertEqual(ChatStore.title(from: "   "), "New chat")
+        XCTAssertEqual(Conversation.title(from: "why does the build fail on my other mac today?"), "Why does the build fail on")
+        XCTAssertEqual(Conversation.title(from: "   "), "New chat")
     }
 
     func testPermissionRuleNamesTheProgramForShellCommands() {

@@ -172,7 +172,7 @@ final class ChatStore {
         let question = text
         mutate(id) { conversation in
             if conversation.messages.isEmpty && conversation.pickedUp == nil {
-                conversation.title = Self.title(from: question)
+                conversation.title = Conversation.title(from: question)
             }
             var message = Message(role: .user, author: "You", text: question, attachments: attachments)
             var all = conversation.pinnedSkills
@@ -230,7 +230,7 @@ final class ChatStore {
         return ProviderKind.deep.first { status($0).isReady }
     }
 
-    /// Asks the OpenAI Decisions API where the first question should go, then answers there.
+    /// Asks `AutoRouter` where the first question should go, then answers there.
     /// Returns true if a deep chat still needs a folder (the question waits and is answered once one is chosen).
     func askAuto(_ rawText: String, attachments: [Attachment], in id: UUID) async -> Bool {
         guard let text = appendQuestion(rawText, attachments: attachments, in: id) else { return false }
@@ -243,16 +243,10 @@ final class ChatStore {
         refreshProviderStatus()
 
         let deep = preferredDeepProvider()
-        var decision: RouteDecision
-        do {
-            let key = OpenAISettings.apiKey() ?? ""
-            let client = OpenAIClient(apiKey: key, model: OpenAISettings.model)
-            let question = text + (attachments.isEmpty ? "" : "\n[\(attachments.count) screenshot(s) attached]")
-            decision = try await client.route(question: question, codeAvailable: deep != nil, shortcuts: folders.shortcuts,
-                                              defaultFolder: (AppDefaults.folder ?? AppDefaults.lastFolder).map(FolderDrop.display))
-        } catch {
-            decision = RouteDecision(route: .quick, folder: nil, reason: "", fellBack: true)
-        }
+        let question = text + (attachments.isEmpty ? "" : "\n[\(attachments.count) screenshot(s) attached]")
+        var decision = await AutoRouter(apiKey: OpenAISettings.apiKey() ?? "").decide(
+            question: question, codeAvailable: deep != nil, shortcuts: folders.shortcuts,
+            defaultFolder: (AppDefaults.folder ?? AppDefaults.lastFolder).map(FolderDrop.display))
         guard routingTokens[id] == token, conversation(id) != nil else { return false }
         routingTokens[id] = nil
 
@@ -326,10 +320,10 @@ final class ChatStore {
                         message.text = Task.isCancelled ? "Stopped." : "(No answer.)"
                     }
                 }
-                self.finishTerminalRun(id, phase: Task.isCancelled ? .stopped : .finished)
+                self.terminals[id]?.finishRun(Task.isCancelled ? .stopped : .finished)
             } catch {
                 let cancelled = error.isCancellation
-                self.finishTerminalRun(id, phase: cancelled ? .stopped : .failed)
+                self.terminals[id]?.finishRun(cancelled ? .stopped : .failed)
                 if !cancelled, provider.isDeep {
                     self.terminals[id, default: TerminalState()].append(.error, error.userMessage)
                 }
@@ -343,17 +337,7 @@ final class ChatStore {
                     }
                 }
             }
-            // Nothing can answer a paused request once the process is gone.
-            self.mutateMessage(id, answer.id) { message in
-                for i in message.permissions.indices where message.permissions[i].status == .pending && message.permissions[i].live {
-                    message.permissions[i].status = .expired
-                }
-                for i in message.questions.indices where message.questions[i].status == .pending { message.questions[i].status = .expired }
-                for i in message.subagents.indices where message.subagents[i].status == .running {
-                    message.subagents[i].status = .done
-                    message.subagents[i].endedAt = Date()
-                }
-            }
+            self.mutateMessage(id, answer.id) { $0.settle() }
             self.runningConversationIDs.remove(id)
             self.runningTasks[id] = nil
             self.handles[id] = nil
@@ -376,7 +360,7 @@ final class ChatStore {
         let delegate = AppDefaults.delegateAgents && kind.delegatePartner.map { status($0).isReady } == true
         let request = ProviderRequest(conversation: conversation, prompt: prompt, attachments: attachments, skills: skills,
                                       level: level, delegate: delegate)
-        if kind.isDeep { beginTerminalRun(id, level: level) }
+        if kind.isDeep { terminals[id, default: TerminalState()].beginRun(level: level) }
 
         var text = TextBatcher()
         for try await event in Providers[kind].run(request, handle: handle) {
@@ -390,131 +374,32 @@ final class ChatStore {
         if let rest = text.flush() { apply(.text(rest), conversationID: id, answerID: answerID) }
     }
 
-    /// A fresh run in the activity pane: the log is kept, everything about the previous run is cleared.
-    private func beginTerminalRun(_ id: UUID, level: PermissionLevel) {
-        var terminal = terminals[id] ?? TerminalState()
-        if !terminal.lines.isEmpty { terminal.append(.info, "") }
-        terminal.run = TerminalRun(phase: .starting, startedAt: Date(), level: level)
-        terminal.run.cliVersion = terminals[id]?.run.cliVersion
-        terminal.changes = []
-        terminal.plan = []
-        terminal.subagents = []
-        terminals[id] = terminal
-    }
-
     private func apply(_ event: ProviderEvent, conversationID id: UUID, answerID: UUID) {
-        switch event {
-        case .session(let sessionID):
-            mutate(id) { $0.cliSessionID = sessionID }
-        case .text(let text):
-            mutateMessage(id, answerID) { $0.text += text }
-        case .textBlockBreak:
-            mutateMessage(id, answerID) { if !$0.text.isEmpty { $0.text += "\n\n" } }
-        case .step(let step):
-            mutateMessage(id, answerID) { message in
-                if let i = message.steps.firstIndex(where: { $0.id == step.id }) {
-                    // Keep "Wants to edit" once a refused patch was relabelled.
-                    var updated = step
-                    if message.steps[i].label == "Wants to edit" { updated.label = "Wants to edit"; updated.failed = false }
-                    message.steps[i] = updated
-                } else {
-                    message.steps.append(step)
-                }
-            }
-        case .stepFinished(let stepID, let failed):
-            mutateMessage(id, answerID) { message in
-                guard let i = message.steps.firstIndex(where: { $0.id == stepID }) else { return }
-                message.steps[i].done = true
-                message.steps[i].failed = failed
-            }
-        case .permissionRequest(let request):
-            if request.live, let approved = retryApprovals[id], approved.tool == request.tool,
-               Self.sameInput(approved.input, request.input) {
-                retryApprovals[id] = nil
-                handles[id]?.respond(requestID: request.id, allow: true, input: request.input)
-                terminals[id, default: TerminalState()].append(.info, "allowed approved retry: \(request.tool) \(request.summary.prefix(120))")
-                return
-            }
-            // "Always allow in this chat" answers on the user's behalf.
-            if request.live, conversation(id)?.alwaysAllowed.contains(request.rule) == true {
-                handles[id]?.respond(requestID: request.id, allow: true, input: request.input)
-                terminals[id, default: TerminalState()].append(.info, "allowed automatically (\(request.ruleLabel) are always allowed in this chat)")
-                return
-            }
-            mutateMessage(id, answerID) { message in
-                if !message.permissions.contains(where: { $0.id == request.id }) { message.permissions.append(request) }
-                // A refused edit is shown as a card, not as a failed step.
-                if !request.live, request.isEdit {
-                    for i in message.steps.indices where message.steps[i].kind == .edit && message.steps[i].failed {
-                        message.steps[i].failed = false
-                        message.steps[i].label = "Wants to edit"
-                    }
-                }
-            }
-            if request.live {
-                let title = request.isEdit ? "Allow an edit to \(request.fileName)?" : "Allow \(request.tool): \(request.summary.prefix(80))?"
-                onNeedsYou?(id, title)
-            }
-            onActivityChanged?()
-        case .question(let question):
-            mutateMessage(id, answerID) { message in
-                if !message.questions.contains(where: { $0.id == question.id }) { message.questions.append(question) }
-            }
-            onNeedsYou?(id, question.title)
-            onActivityChanged?()
-        case .requestCancelled(let requestID):
-            mutateMessage(id, answerID) { message in
-                if let i = message.permissions.firstIndex(where: { $0.id == requestID && $0.status == .pending }) { message.permissions[i].status = .expired }
-                if let i = message.questions.firstIndex(where: { $0.id == requestID && $0.status == .pending }) { message.questions[i].status = .expired }
-            }
-            onActivityChanged?()
-        case .subagentStarted(let subagent):
-            mutateMessage(id, answerID) { message in
-                if !message.subagents.contains(where: { $0.id == subagent.id }) { message.subagents.append(subagent) }
-            }
-            terminals[id, default: TerminalState()].subagents.append(subagent)
-        case .subagentActivity(let subagentID, let current):
-            mutateMessage(id, answerID) { message in
-                if let i = message.subagents.firstIndex(where: { $0.id == subagentID }) { message.subagents[i].current = current }
-            }
-        case .subagentFinished(let subagentID, let failed):
-            mutateMessage(id, answerID) { message in
-                guard let i = message.subagents.firstIndex(where: { $0.id == subagentID }) else { return }
-                message.subagents[i].status = failed ? .failed : .done
-                message.subagents[i].endedAt = Date()
-            }
-            if let i = terminals[id]?.subagents.firstIndex(where: { $0.id == subagentID }) {
-                terminals[id]?.subagents[i].status = failed ? .failed : .done
-                terminals[id]?.subagents[i].endedAt = Date()
-            }
-        case .fileChange(let change):
-            mutateMessage(id, answerID) { message in
-                // Several edits to one file are shown as separate entries, newest last; the same edit is never listed twice.
-                if let i = message.changes.firstIndex(where: { $0.id == change.id }) { message.changes[i] = change } else { message.changes.append(change) }
-            }
-            var changes = terminals[id]?.changes ?? []
-            if let i = changes.firstIndex(where: { $0.id == change.id }) { changes[i] = change } else { changes.append(change) }
-            terminals[id, default: TerminalState()].changes = changes
-        case .warning(let text):
-            mutateMessage(id, answerID) { $0.warning = text }
-            terminals[id, default: TerminalState()].append(.error, text)
-        case .log(let kind, let text, let agent):
-            guard !text.isEmpty else { return }
-            terminals[id, default: TerminalState()].append(kind, text, agent: agent)
-        case .raw(let line):
-            terminals[id, default: TerminalState()].appendRaw(line)
-        case .runInfo(let patch):
-            terminals[id, default: TerminalState()].run.apply(patch)
-        case .plan(let plan):
-            terminals[id, default: TerminalState()].plan = plan
+        if case .permissionRequest(let request) = event, answerOnUsersBehalf(request, in: id) { return }
+        if !event.isTelemetry {
+            var effect = ReducerEffect()
+            mutate(id) { effect = $0.apply(event, answerID: answerID) }
+            if let title = effect.needsYou { onNeedsYou?(id, title) }
+            if effect.activityChanged { onActivityChanged?() }
         }
+        if event.concernsTerminal { terminals[id, default: TerminalState()].apply(event) }
     }
 
-    private func finishTerminalRun(_ id: UUID, phase: TerminalRun.Phase) {
-        guard var terminal = terminals[id], terminal.run.isActive else { return }
-        terminal.run.phase = phase
-        terminal.run.endedAt = Date()
-        terminals[id] = terminal
+    /// A live request the user already answered: the edit they approved for this retry, or a rule they always allow in this chat.
+    private func answerOnUsersBehalf(_ request: PermissionRequest, in id: UUID) -> Bool {
+        guard request.live else { return false }
+        let note: String
+        if let approved = retryApprovals[id], approved.tool == request.tool, Self.sameInput(approved.input, request.input) {
+            retryApprovals[id] = nil
+            note = "allowed approved retry: \(request.tool) \(request.summary.prefix(120))"
+        } else if conversation(id)?.alwaysAllowed.contains(request.rule) == true {
+            note = "allowed automatically (\(request.ruleLabel) are always allowed in this chat)"
+        } else {
+            return false
+        }
+        handles[id]?.respond(requestID: request.id, allow: true, input: request.input)
+        terminals[id, default: TerminalState()].append(.info, note)
+        return true
     }
 
     func clearTerminal(_ id: UUID) {
@@ -665,36 +550,5 @@ final class ChatStore {
         }
         receive(share)
         return share
-    }
-
-    // MARK: Building a share
-
-    /// `id` and `createdAt` are fixed for the live preview, so it isn't a new share on every render.
-    func buildShare(from prep: SharePrep, conversation: Conversation, id: UUID = UUID(), createdAt: Date = Date()) -> ShareSummary {
-        ShareSummary(
-            id: id,
-            title: prep.title.isEmpty ? conversation.title : prep.title,
-            senderName: peers.localDisplayName,
-            senderDevice: peers.localDevice,
-            createdAt: createdAt,
-            summary: prep.summary.trimmingCharacters(in: .whitespacesAndNewlines),
-            kept: prep.kept,
-            decisions: prep.decisions.filter(\.included).map(\.value),
-            openQuestions: prep.questions.filter(\.included).map(\.value),
-            notes: prep.notes.filter(\.included).map(\.value),
-            fileNames: prep.includeFileNames ? conversation.referencedFileNames : [],
-            transcript: prep.includeTranscript
-                ? conversation.messages.filter { $0.error == nil && !$0.text.isEmpty }.map { TranscriptLine(author: $0.author, text: $0.text) }
-                : nil,
-            keyFacts: prep.facts.filter(\.included).map(\.value),
-            nextSteps: prep.nextSteps.filter(\.included).map(\.value),
-            images: prep.includeScreenshots ? prep.sharedImages : nil
-        )
-    }
-
-    static func title(from text: String) -> String {
-        let words = text.split(whereSeparator: \.isWhitespace).prefix(6).joined(separator: " ")
-        let trimmed = words.trimmingCharacters(in: CharacterSet(charactersIn: "?.!,:;"))
-        return trimmed.isEmpty ? "New chat" : trimmed.prefix(1).uppercased() + trimmed.dropFirst()
     }
 }

@@ -839,7 +839,7 @@ final class PanelModel {
                     return
                 }
                 guard !Task.isCancelled, multiShare === multi else { return }
-                built.append((conversation.id, store.buildShare(from: item, conversation: conversation)))
+                built.append((conversation.id, item.share(of: conversation, from: store.peers)))
                 multi.phase = .summarizing(done: index + 1, total: chosen.count)
             }
             guard let first = built.first else { return }
@@ -902,7 +902,7 @@ final class PanelModel {
         guard let prep, let conversation = store.conversation(prep.conversationID) else { return }
         if case .failed = prep.phase, !prep.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { prep.phase = .ready }
         guard prep.canContinue else { return }
-        let share = store.buildShare(from: prep, conversation: conversation)
+        let share = prep.share(of: conversation, from: store.peers)
         peers.clearOutgoing()
         withAnimation(Motion.shareMode(reduceMotion)) { mode = .send(conversationID: conversation.id, share: share) }
     }
