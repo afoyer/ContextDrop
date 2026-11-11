@@ -6,16 +6,23 @@ enum ProviderEvent: Sendable {
     case textBlockBreak               // a new paragraph from a later agent turn
     case step(ToolStep)               // insert or update by id
     case stepFinished(id: String, failed: Bool)
-    case editRequest(EditRequest)     // an edit the agent wasn't allowed to make yet
-    case editsBlocked                 // Codex: a patch was rejected by the read-only sandbox
+    case permissionRequest(PermissionRequest) // the agent wants to do something that needs a yes
+    case question(AgentQuestion)      // the agent asked a multiple-choice question
+    case requestCancelled(String)     // the CLI withdrew a pending request or question
+    case subagentStarted(Subagent)
+    case subagentActivity(id: String, current: String)
+    case subagentFinished(id: String, failed: Bool)
+    case fileChange(FileChange)       // a file was changed (with its diff when known)
+    case warning(String)              // the run ended early or oddly
     case session(String)              // CLI session / thread id for resuming
-    case log(TerminalLine.Kind, String) // terminal pane only
+    case log(TerminalLine.Kind, String, agent: String? = nil) // activity pane only
+    case raw(String)                  // the CLI's JSON line, for the Raw JSON view
     case runInfo(TerminalRunPatch)    // terminal pane status (pid, model, tokens, exit code…)
 
     /// Terminal-pane telemetry that doesn't count as an answer.
     var isTelemetry: Bool {
         switch self {
-        case .log, .runInfo: true
+        case .log, .runInfo, .raw: true
         default: false
         }
     }
@@ -49,9 +56,9 @@ enum ProviderError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingKey: "No OpenRouter API key. Add one in Settings."
-        case .http(let code, let message): code == 401 ? "OpenRouter rejected the API key (401). \(message)" : "OpenRouter error \(code): \(message)"
-        case .badResponse: "OpenRouter sent an unexpected response."
+        case .missingKey: "No OpenAI API key. Add one in Settings."
+        case .http(let code, let message): code == 401 ? "OpenAI rejected the API key (401). \(message)" : "OpenAI error \(code): \(message)"
+        case .badResponse: "OpenAI sent an unexpected response."
         case .notInstalled(let tool): "\(tool) isn't installed on this Mac."
         case .process(let message): message
         case .noFolder: "Choose a project folder first."
@@ -61,8 +68,8 @@ enum ProviderError: LocalizedError {
     /// Short headline for the error card.
     var headline: String {
         switch self {
-        case .missingKey: "Add your OpenRouter key"
-        case .http, .badResponse: "OpenRouter didn’t respond"
+        case .missingKey: "Add your OpenAI key"
+        case .http, .badResponse: "OpenAI didn’t respond"
         case .notInstalled: "Tool not found"
         case .process: "The agent stopped"
         case .noFolder: "No folder chosen"

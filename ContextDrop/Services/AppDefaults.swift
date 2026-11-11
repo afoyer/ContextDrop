@@ -5,6 +5,32 @@ enum AppDefaults {
     static let providerKey = "ContextDrop.defaultProvider"
     static let folderKey = "ContextDrop.defaultFolder"
     static let claudeModelKey = "ContextDrop.claudeModel"
+    static let autoRouteKey = "ContextDrop.autoRoute"
+    static let lastFolderKey = "ContextDrop.lastFolder"
+
+    /// Auto mode: the OpenAI Decisions API decides quick answer vs. Claude Code for a new chat's first question.
+    static var autoRoute: Bool {
+        get { UserDefaults.standard.object(forKey: autoRouteKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: autoRouteKey) }
+    }
+
+    static let delegateKey = "ContextDrop.delegateAgents"
+
+    /// Coding agents may hand self-contained side tasks to the other CLI (Claude Code ⇄ Codex).
+    static var delegateAgents: Bool {
+        get { UserDefaults.standard.bool(forKey: delegateKey) }
+        set { UserDefaults.standard.set(newValue, forKey: delegateKey) }
+    }
+
+    /// The folder most recently used by a deep chat.
+    static var lastFolder: URL? {
+        get {
+            guard let path = UserDefaults.standard.string(forKey: lastFolderKey), !path.isEmpty,
+                  FileManager.default.fileExists(atPath: path) else { return nil }
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        set { UserDefaults.standard.set(newValue?.path, forKey: lastFolderKey) }
+    }
 
     /// `claude --model` aliases. Empty = whatever the CLI is configured to use.
     static let claudeModels: [(id: String, label: String)] = [
@@ -12,7 +38,7 @@ enum AppDefaults {
     ]
 
     static var provider: ProviderKind {
-        get { UserDefaults.standard.string(forKey: providerKey).flatMap(ProviderKind.init(rawValue:)) ?? .openRouter }
+        get { UserDefaults.standard.string(forKey: providerKey).flatMap(ProviderKind.init(rawValue:)) ?? .openAI }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: providerKey) }
     }
 

@@ -46,6 +46,7 @@ struct OutgoingTransfer: Equatable {
 final class PeerService: NSObject {
     nonisolated static let serviceType = "ctxdrop"
     nonisolated static let invitationTimeout: TimeInterval = 90
+    nonisolated static let receiveTimeout: TimeInterval = 30
 
     private(set) var localDisplayName: String
     private(set) var localDevice: String = MachineInfo.cachedModel ?? "Mac"
@@ -56,9 +57,12 @@ final class PeerService: NSObject {
     var notice: String?
 
     /// Called when a full share arrived and was acknowledged. `open` = the user chose Continue.
-    @ObservationIgnored var onShareReceived: (@MainActor (ShareSummary, Bool) -> Void)?
+    /// One share, or several tabs shared together (first is the one the offer previewed).
+    @ObservationIgnored var onShareReceived: (@MainActor ([ShareSummary], Bool) -> Void)?
     /// Called when a new offer arrives (to show the notification panel).
     @ObservationIgnored var onOfferArrived: (@MainActor (IncomingOffer) -> Void)?
+    /// Called when someone nearby invites this Mac into a room (see `RoomService`). The receiver must call the reply.
+    @ObservationIgnored var onRoomInvitation: (@MainActor (RoomInvitation, MCPeerID, InvitationReply) -> Void)?
 
     var nearbyPeers: [NearbyPeer] { peers.filter(\.isNearby) }
 
@@ -69,6 +73,8 @@ final class PeerService: NSObject {
         var role: Role
         let startedAt: Date
         var completed = false
+        /// Tabs sent along with the main share.
+        var extras: [ShareSummary] = []
     }
 
     @ObservationIgnored private var myPeerID: MCPeerID
@@ -148,12 +154,15 @@ final class PeerService: NSObject {
 
     // MARK: Sending
 
-    func send(_ share: ShareSummary, to peerID: MCPeerID) {
+    func send(_ share: ShareSummary, extras: [ShareSummary] = [], to peerID: MCPeerID) {
         if let current = outgoing, current.phase == .waiting || current.phase == .sending { return }
+        let extras = Array(extras.prefix(WireEnvelope.maxExtraShares))
         let session = makeSession()
-        transfers[ObjectIdentifier(session)] = Transfer(session: session, peerID: peerID, role: .sending(share), startedAt: Date())
+        transfers[ObjectIdentifier(session)] = Transfer(session: session, peerID: peerID, role: .sending(share), startedAt: Date(), extras: extras)
         outgoing = OutgoingTransfer(shareID: share.id, peerID: peerID, phase: .waiting, startedAt: Date())
-        browser.invitePeer(peerID, to: session, withContext: WireCodec.encodePreview(share.preview), timeout: Self.invitationTimeout)
+        var preview = share.preview
+        if !extras.isEmpty { preview.tabTitles = ([share] + extras).map { String($0.title.prefix(60)) } }
+        browser.invitePeer(peerID, to: session, withContext: WireCodec.encodePreview(preview), timeout: Self.invitationTimeout)
         p2pLog.info("Offered \"\(share.title, privacy: .public)\" to \(peerID.displayName, privacy: .public)")
     }
 
@@ -187,6 +196,18 @@ final class PeerService: NSObject {
         offers[index].phase = .receiving(open: open)
         reply.handler(true, session)
         p2pLog.info("Accepted offer from \(offer.senderName, privacy: .public)")
+
+        // Never sit on "Receiving…" forever: give up if nothing arrived.
+        let key = ObjectIdentifier(session)
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.receiveTimeout))
+            guard let self, let transfer = self.transfers[key], !transfer.completed else { return }
+            p2pLog.error("Timed out receiving from \(offer.senderName, privacy: .public)")
+            self.transfers[key] = nil
+            transfer.session.disconnect()
+            if let i = self.offers.firstIndex(where: { $0.id == offer.id }) { self.offers[i].phase = .failed }
+            self.notice = "\(offer.senderName)’s chat didn’t arrive. Make sure you’re both on the same Wi-Fi (or Bluetooth is on) and ask them to send it again."
+        }
     }
 
     func markSeen(_ offer: IncomingOffer) {
@@ -217,6 +238,15 @@ final class PeerService: NSObject {
     }
 
     fileprivate func handleInvitation(from peerID: MCPeerID, context: Data?, reply: InvitationReply) {
+        // Room invitations carry a different context; everything else is a share offer, as before.
+        if let invitation = RoomCodec.decodeInvitation(context) {
+            if let onRoomInvitation {
+                onRoomInvitation(invitation, peerID, reply)
+            } else {
+                reply.handler(false, nil)
+            }
+            return
+        }
         guard let preview = WireCodec.decodePreview(context) else {
             p2pLog.error("Rejected invitation without a valid preview from \(peerID.displayName, privacy: .public)")
             reply.handler(false, nil)
@@ -245,7 +275,9 @@ final class PeerService: NSObject {
             if case .sending(let share) = transfer.role {
                 outgoing?.phase = .sending
                 do {
-                    let data = try WireCodec.encode(WireEnvelope(kind: .share, share: share))
+                    let envelope = WireEnvelope(kind: .share, share: share, shares: transfer.extras.isEmpty ? nil : transfer.extras)
+                    let data = try WireCodec.encode(envelope)
+                    guard data.count <= WireCodec.maxPayloadBytes else { throw WireError.payloadTooLarge(data.count) }
                     try session.send(data, toPeers: [transfer.peerID], with: .reliable)
                 } catch {
                     p2pLog.error("Send failed: \(error.localizedDescription, privacy: .public)")
@@ -287,7 +319,7 @@ final class PeerService: NSObject {
                 transfers[key]?.completed = true
                 offers.removeAll { $0.id == offerID }
                 p2pLog.info("Received \"\(share.title, privacy: .public)\" from \(transfer.peerID.displayName, privacy: .public)")
-                onShareReceived?(share, open)
+                onShareReceived?([share] + (envelope.shares ?? []), open)
                 closeLater(session)
             case (.ack, .sending(let share)) where envelope.ackID == share.id:
                 p2pLog.info("Delivered to \(transfer.peerID.displayName, privacy: .public)")
@@ -305,6 +337,21 @@ final class PeerService: NSObject {
         isDiscovering = false
         p2pLog.error("\(what, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
         notice = "Couldn't start \(what). Check System Settings › Privacy & Security › Local Network."
+    }
+
+    // MARK: Rooms (used by RoomService)
+
+    /// The local peer, for sessions owned outside this class.
+    var localPeerID: MCPeerID { myPeerID }
+
+    /// A session for the local peer with no delegate set; the caller owns it and its callbacks.
+    func makeUnownedSession() -> MCSession {
+        MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .required)
+    }
+
+    /// Invites a nearby peer into a session owned by someone else (a room).
+    func invite(_ peerID: MCPeerID, to session: MCSession, context: Data, timeout: TimeInterval = 60) {
+        browser.invitePeer(peerID, to: session, withContext: context, timeout: timeout)
     }
 
     // MARK: Helpers

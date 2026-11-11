@@ -4,6 +4,21 @@ import SwiftUI
 /// Hosting view that takes the first click even when the app is inactive (non-activating panels).
 final class FirstClickHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// Keep the window exactly as big as the SwiftUI content, including changes made while it was hidden
+    /// (a share arriving, a file opened), so it never reappears at a stale size with content cut off.
+    override func invalidateIntrinsicContentSize() {
+        super.invalidateIntrinsicContentSize()
+        DispatchQueue.main.async { [weak self] in self?.fitWindow() }
+    }
+
+    func fitWindow() {
+        guard let window else { return }
+        layoutSubtreeIfNeeded()
+        let size = fittingSize
+        guard size.width > 1, size.height > 1, window.contentRect(forFrameRect: window.frame).size != size else { return }
+        window.setContentSize(size)
+    }
 }
 
 /// Spotlight-like floating panel: non-activating, floats over every app and Space, grows downward from a fixed top.
@@ -13,6 +28,14 @@ final class FloatingPanel: NSPanel {
     /// Top-center anchor, so content changes grow the panel downward and widen it symmetrically.
     var anchorTop: CGFloat = 0
     var anchorMidX: CGFloat = 0
+    /// Width added on the right only (the terminal pane): the chat column keeps its place.
+    var rightExtension: () -> CGFloat = { 0 }
+    /// Tells the content how tall it may get on this screen.
+    var onAvailableHeight: ((CGFloat) -> Void)?
+    /// Off while the show animation moves the panel itself.
+    var anchoringEnabled = true
+    /// True while `setFrame` is placing the panel, so those moves aren't mistaken for a drag.
+    private var placing = false
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 640, height: 200),
@@ -28,6 +51,18 @@ final class FloatingPanel: NSPanel {
         isOpaque = false
         hasShadow = true
         animationBehavior = .utilityWindow
+        NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: self, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.userMoved() }
+        }
+    }
+
+    /// The user dragged the panel: keep it there instead of snapping back on the next resize.
+    private func userMoved() {
+        guard anchoringEnabled, !placing, anchorTop > 0, isVisible else { return }
+        let extra = min(rightExtension(), frame.width)
+        anchorTop = frame.maxY
+        anchorMidX = frame.minX + (frame.width - extra) / 2
+        if let visible = (screen ?? NSScreen.main)?.visibleFrame { onAvailableHeight?(max(240, anchorTop - visible.minY - 16)) }
     }
 
     override var canBecomeKey: Bool { true }
@@ -42,9 +77,22 @@ final class FloatingPanel: NSPanel {
 
     override func setFrame(_ frameRect: NSRect, display flag: Bool) {
         var frame = frameRect
-        if anchorTop > 0 {
+        placing = true
+        defer { placing = false }
+        if anchorTop > 0 && anchoringEnabled {
+            let extra = min(rightExtension(), frame.width)
             frame.origin.y = anchorTop - frame.height
-            frame.origin.x = (anchorMidX - frame.width / 2).rounded()
+            frame.origin.x = (anchorMidX - (frame.width - extra) / 2).rounded()
+            // Stay on screen when the pane would run past the right edge.
+            let anchor = NSPoint(x: anchorMidX, y: anchorTop - 1)
+            if let visible = (NSScreen.screens.first { $0.frame.contains(anchor) } ?? screen)?.visibleFrame {
+                if frame.maxX > visible.maxX - 8 { frame.origin.x = visible.maxX - 8 - frame.width }
+                if frame.minX < visible.minX + 8 { frame.origin.x = visible.minX + 8 }
+                // Last resort if content is still too tall: slide up rather than run off the bottom.
+                if frame.minY < visible.minY + 8 {
+                    frame.origin.y = min(visible.minY + 8, visible.maxY - frame.height)
+                }
+            }
         }
         super.setFrame(frame, display: flag)
         invalidateShadow()
@@ -55,8 +103,10 @@ final class FloatingPanel: NSPanel {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
         guard let visible = screen?.visibleFrame else { return }
-        anchorTop = visible.maxY - visible.height * 0.16
+        // Smaller gap on short screens (13" laptops) so the panel has room to grow.
+        anchorTop = visible.maxY - visible.height * (visible.height < 900 ? 0.08 : 0.16)
         anchorMidX = visible.midX
+        onAvailableHeight?(anchorTop - visible.minY - 16)
         setFrame(frame, display: false)
     }
 }
@@ -66,13 +116,19 @@ final class FloatingPanel: NSPanel {
 final class QuickChatPanelController {
     let panel = FloatingPanel()
     let model: PanelModel
+    private let hosting: FirstClickHostingView<QuickChatView>
+    private var swipe: TabSwipeTracker?
+    private var keyMonitor: Any?
 
     init(model: PanelModel) {
         self.model = model
         let hosting = FirstClickHostingView(rootView: QuickChatView(model: model))
+        self.hosting = hosting
         hosting.sizingOptions = [.intrinsicContentSize]
         panel.contentView = hosting
         panel.onEscape = { [weak self] in self?.model.escape() }
+        panel.rightExtension = { [weak model] in MainActor.assumeIsolated { model?.rightExtension ?? 0 } }
+        panel.onAvailableHeight = { [weak model] height in MainActor.assumeIsolated { model?.maxPanelHeight = height } }
         panel.onResignKey = { [weak self] in
             guard let self, !self.model.keepsOpenOnResign, self.panel.isVisible else { return }
             // Don't hide while one of our own popovers/menus took key.
@@ -80,6 +136,19 @@ final class QuickChatPanelController {
             self.hide()
         }
         model.onHide = { [weak self] in self?.hide() }
+        // Tabs in Quick Chat: swipe sideways anywhere on the panel, or ⌃Tab / ⌃⇧Tab.
+        swipe = TabSwipeTracker(model: model, offset: \.panelSwipe, window: { [weak self] in self?.panel },
+                                current: { [weak model] in model?.panelConversationID },
+                                select: { [weak model] id in model?.selectPanelTab(id) })
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let handled = MainActor.assumeIsolated { () -> Bool in
+                guard let self, event.window === self.panel, event.keyCode == 48,
+                      event.modifierFlags.contains(.control), self.model.panelConversationID != nil else { return false }
+                self.model.cyclePanelTab(backwards: event.modifierFlags.contains(.shift))
+                return true
+            }
+            return handled ? nil : event
+        }
     }
 
     var isVisible: Bool { panel.isVisible }
@@ -89,18 +158,32 @@ final class QuickChatPanelController {
     func show() {
         if !panel.isVisible { panel.positionOnActiveScreen() }
         model.summoned()
+        hosting.fitWindow()
         let reduce = model.reduceMotion
         if !panel.isVisible {
             panel.alphaValue = 0
             let final = panel.frame
-            if !reduce { panel.setFrame(final.offsetBy(dx: 0, dy: 6), display: false) }
+            // Settles 6 pt down into place. The anchor is off meanwhile, or it would cancel the move.
+            if !reduce {
+                panel.anchoringEnabled = false
+                panel.setFrame(final.offsetBy(dx: 0, dy: 6), display: false)
+            }
             panel.makeKeyAndOrderFront(nil)
-            NSAnimationContext.runAnimationGroup { context in
+            NSAnimationContext.runAnimationGroup({ context in
                 context.duration = reduce ? 0.12 : 0.18
                 context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
                 panel.animator().alphaValue = 1
-            }
-            if !reduce { panel.anchorTop -= 0 }
+                // Through NSWindow, so the animator proxy gets an Objective-C message. Calling the Swift
+                // override directly would run it on the proxy object and write past its memory.
+                if !reduce { (panel as NSWindow).animator().setFrame(final, display: true) }
+            }, completionHandler: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.panel.anchoringEnabled = true
+                    self.hosting.fitWindow()
+                    self.panel.setFrame(self.panel.frame, display: true) // back on the anchor, at the current size
+                }
+            })
         } else {
             panel.makeKeyAndOrderFront(nil)
         }
@@ -120,7 +203,8 @@ final class QuickChatPanelController {
     }
 }
 
-/// Top-right, non-activating notification for an incoming share (board 4 · 01). Never takes focus.
+/// Top-right, non-activating notification for an incoming share or room invitation (board 4 · 01).
+/// Never takes focus.
 @MainActor
 final class NotificationPanelController {
     private var panel: NSPanel?
@@ -130,21 +214,40 @@ final class NotificationPanelController {
     init(model: PanelModel) { self.model = model }
 
     func show(_ offer: IncomingOffer) {
+        present(ShareNotificationView(model: model, offer: offer) { [weak self] in self?.close() })
+    }
+
+    func show(_ invitation: RoomInvitation, store: RoomStore, onJoined: @escaping @MainActor () -> Void) {
+        let card = RoomInvitationView(store: store, invitation: invitation) { [weak self] joined in
+            self?.close()
+            if joined { onJoined() }
+        }
+        .frame(width: 340)
+        .background(MaterialBackground(material: .hudWindow))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
+        present(card, stay: 20)
+    }
+
+    private func present<Content: View>(_ content: Content, stay: TimeInterval = 8) {
         close()
         let panel = NonKeyPanel(contentRect: .zero, styleMask: [.nonactivatingPanel, .borderless], backing: .buffered, defer: false)
+        let screen = NSScreen.main?.visibleFrame ?? .zero
+        panel.anchorTop = screen.maxY - 12 // Preview grows the card downward, not off the top of the screen
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
-        let hosting = FirstClickHostingView(rootView: ShareNotificationView(model: model, offer: offer) { [weak self] in self?.close() }
-            .onHover { [weak self] inside in if inside { self?.hideTask?.cancel() } })
+        // Stays while the pointer is on it; the countdown starts again when it leaves.
+        let hosting = FirstClickHostingView(rootView: content.onHover { [weak self] inside in
+            if inside { self?.hideTask?.cancel() } else { self?.scheduleClose(after: stay) }
+        })
         hosting.sizingOptions = [.intrinsicContentSize]
         panel.contentView = hosting
         panel.setContentSize(hosting.fittingSize)
 
-        let screen = NSScreen.main?.visibleFrame ?? .zero
         let size = panel.frame.size
         let target = NSRect(x: screen.maxX - size.width - 16, y: screen.maxY - size.height - 12, width: size.width, height: size.height)
         let reduce = model.reduceMotion
@@ -155,13 +258,18 @@ final class NotificationPanelController {
             context.duration = reduce ? 0.15 : 0.3
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
             panel.animator().alphaValue = 1
-            if !reduce { panel.animator().setFrame(target, display: true) }
+            if !reduce { (panel as NSWindow).animator().setFrame(target, display: true) }
         }
         self.panel = panel
+        // Ignored → it lives on in the Quick Chat list and the menu bar.
+        scheduleClose(after: stay)
+    }
 
-        // Ignored for 8 s → it lives on at the top of the Quick Chat list.
+    private func scheduleClose(after seconds: TimeInterval) {
+        hideTask?.cancel()
+        guard panel != nil else { return }
         hideTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(8))
+            try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             self?.close()
         }
@@ -181,43 +289,13 @@ final class NotificationPanelController {
 }
 
 private final class NonKeyPanel: NSPanel {
+    var anchorTop: CGFloat = 0
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
-}
 
-/// ⌘↵: the same conversation in a regular, resizable window (the "expanded" deep-chat window).
-@MainActor
-final class ChatWindowController: NSObject, NSWindowDelegate {
-    private var windows: [UUID: NSWindow] = [:]
-    private let model: PanelModel
-
-    init(model: PanelModel) { self.model = model }
-
-    func open(_ conversationID: UUID) {
-        if let window = windows[conversationID] {
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-            return
-        }
-        let view = ChatView(model: model, conversationID: conversationID, style: .window)
-            .frame(minWidth: 640, minHeight: 480)
-            .background(MaterialBackground(material: .sidebar))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1030, height: 780),
-                              styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
-                              backing: .buffered, defer: false)
-        window.titlebarAppearsTransparent = true
-        window.title = model.store.conversation(conversationID)?.title ?? "ContextDrop"
-        window.contentView = NSHostingView(rootView: view)
-        window.isReleasedWhenClosed = false
-        window.center()
-        window.delegate = self
-        windows[conversationID] = window
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow else { return }
-        windows = windows.filter { $0.value !== window }
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        var frame = frameRect
+        if anchorTop > 0 { frame.origin.y = anchorTop - frame.height }
+        super.setFrame(frame, display: flag)
     }
 }

@@ -5,7 +5,8 @@ struct ContextDropApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        // Agent app: UI lives in panels owned by the AppDelegate. A Settings scene satisfies `App`.
-        Settings { SettingsView(store: appDelegate.store, shortcuts: appDelegate.shortcuts) }
+        // Agent app: all UI, including the Settings window, is owned by the AppDelegate.
+        // An empty Settings scene only satisfies `App`'s need for one scene.
+        Settings { EmptyView() }
     }
 }

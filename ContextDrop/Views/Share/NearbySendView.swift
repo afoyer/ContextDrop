@@ -73,10 +73,11 @@ struct NearbySendView: View {
     }
 
     private var headerTitle: String {
-        guard let outgoing else { return share.title }
+        let extra = model.extraShareCount
+        guard let outgoing else { return extra > 0 ? "\(share.title) + \(extra) more tab\(extra == 1 ? "" : "s")" : share.title }
         switch outgoing.phase {
         case .waiting, .sending: return "Sending to \(outgoing.peerName)…"
-        case .delivered: return "\(outgoing.peerName) is continuing your chat"
+        case .delivered: return extra > 0 ? "\(outgoing.peerName) has your \(extra + 1) tabs" : "\(outgoing.peerName) is continuing your chat"
         case .declined: return "\(outgoing.peerName) didn’t accept"
         case .failed: return "Couldn’t reach \(outgoing.peerName)"
         }

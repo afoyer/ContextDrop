@@ -1,14 +1,30 @@
 import SwiftUI
 
-/// A conversation laid out like a document (board 1 · 03, board 4 · 03, board 6 · 02).
+/// A conversation laid out like a document (board 1 · 03, board 4 · 03, R2 board 6 · 02, R3 board 1).
 struct ChatView: View {
     enum Style { case panel, window }
 
     @Bindable var model: PanelModel
     let conversationID: UUID
     let style: Style
+    /// Fill the height the parent gives (next to the activity pane, or in the window) instead of sizing to content.
+    var fillsHeight = false
     @FocusState private var inputFocused: Bool
     @State private var hoveredMessageID: UUID?
+    /// Height of everything except the transcript (header, notices, composer), measured.
+    @State private var totalHeight: CGFloat = 0
+    @State private var transcriptHeight: CGFloat = 0
+    /// Auto-scroll only while the user is reading the end of the chat.
+    @State private var atBottom = true
+
+    private var session: ChatSession { model.session(conversationID) }
+
+    /// The transcript gives up height so the composer always stays on screen, however much is typed.
+    private var transcriptMax: CGFloat {
+        guard style == .panel, !fillsHeight else { return .infinity }
+        let chrome = max(100, totalHeight - transcriptHeight)
+        return max(120, min(520, model.maxPanelHeight - PanelModel.tabStripHeight - chrome))
+    }
 
     private var store: ChatStore { model.store }
     private var conversation: Conversation? { store.conversation(conversationID) }
@@ -16,8 +32,10 @@ struct ChatView: View {
     var body: some View {
         if let conversation {
             VStack(spacing: 0) {
-                header(conversation)
-                HairlineDivider()
+                if style == .panel {
+                    header(conversation)
+                    HairlineDivider()
+                }
                 transcript(conversation)
                 if let notice = model.peers.notice {
                     HairlineDivider()
@@ -26,49 +44,74 @@ struct ChatView: View {
                 HairlineDivider()
                 composer(conversation)
             }
-            .onAppear { inputFocused = true }
-            .onChange(of: model.focusToken) { inputFocused = true }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { totalHeight = $0 }
+            .onAppear {
+                inputFocused = true
+                store.markSeen(conversationID)
+            }
+            .onChange(of: model.focusToken) { if style == .panel { inputFocused = true } }
+            .onChange(of: session.focusToken) { inputFocused = true }
+            .onChange(of: inputFocused) { _, focused in
+                if focused { model.composerFocused(conversationID, inWindow: style == .window) }
+            }
+            .onChange(of: store.isRunning(conversationID)) { _, running in if !running { store.markSeen(conversationID) } }
         }
     }
 
-    // MARK: Header
+    // MARK: Header (panel; the window has its own)
 
     private func header(_ conversation: Conversation) -> some View {
-        HStack(spacing: 10) {
-            Text(conversation.title)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-            if let picked = conversation.pickedUp {
-                PersonBadge(name: picked.senderName, prefix: "From", tint: Palette.fromTint)
-            }
-            PrivateBadge()
-            if let shared = conversation.sharedWith.last {
-                PersonBadge(name: shared, prefix: "Shared with")
-                    .transition(Motion.pop(model.reduceMotion))
-            }
-            if conversation.provider.isDeep {
-                FolderChip(model: model, conversation: conversation)
-            }
-            Spacer()
-            if style == .panel {
+        VStack(spacing: 0) {
+            // Row 1: what this chat is, who answers, and where it can go.
+            HStack(spacing: 10) {
+                Text(conversation.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(minWidth: 80, alignment: .leading)
+                    .layoutPriority(1)
+                // Badges give way before the title or the buttons do.
+                ViewThatFits(in: .horizontal) {
+                    ChatBadges(conversation: conversation, reduceMotion: model.reduceMotion)
+                    PrivateBadge()
+                    Color.clear.frame(width: 0, height: 0)
+                }
+                Spacer(minLength: 4)
                 ProviderPill(model: model, conversationID: conversation.id)
-            }
-            Button { model.beginShare(conversation.id) } label: { Image(systemName: "square.and.arrow.up") }
-                .buttonStyle(.borderless)
-                .help(conversation.pickedUp != nil ? "Share back (⌘⇧S)" : "Share this chat (⌘⇧S)")
-                .accessibilityLabel("Share this chat")
-                .keyboardShortcut("s", modifiers: [.command, .shift])
-                .disabled(conversation.messages.isEmpty)
-            if style == .panel {
-                Button { model.onExpand?(conversation.id) } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+                    .fixedSize()
+                Button { model.beginShare(conversation.id) } label: { Image(systemName: "square.and.arrow.up") }
                     .buttonStyle(.borderless)
-                    .help("Open in window (⌘↵)")
-                    .accessibilityLabel("Open in window")
+                    .help(conversation.pickedUp != nil ? "Share back (⌘⇧S)" : "Share this chat (⌘⇧S)")
+                    .accessibilityLabel("Share this chat")
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                    .disabled(conversation.messages.isEmpty)
+                Button { model.onExpand?(conversation.id) } label: { Image(systemName: "macwindow") }
+                    .buttonStyle(.borderless)
+                    .help("Open in the window (⌘↵)")
+                    .accessibilityLabel("Open in the window")
+            }
+            .frame(height: 42)
+            // Row 2, coding agents only: where it works and what it may do.
+            if conversation.provider.isDeep {
+                HStack(spacing: 8) {
+                    FolderChip(model: model, conversation: conversation)
+                    PermissionLevelMenu(store: store, conversation: conversation)
+                    Spacer(minLength: 4)
+                    if !model.showTerminal {
+                        Button { model.toggleTerminal() } label: {
+                            HStack(spacing: 4) { Image(systemName: "sidebar.right"); Text("Activity") }
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 12))
+                        .help("Show activity (⌥⌘A)")
+                    }
+                }
+                .frame(height: 30)
+                .padding(.bottom, 6)
             }
         }
         .padding(.leading, 18)
-        .padding(.trailing, 12)
-        .frame(height: 44)
+        .padding(.trailing, 14)
         .animation(Motion.keep(model.reduceMotion), value: conversation.sharedWith)
     }
 
@@ -79,117 +122,262 @@ struct ChatView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if let picked = conversation.pickedUp {
-                        PickedUpBlock(share: picked, reduceMotion: model.reduceMotion)
+                        PickedUpBlock(share: picked, attachments: conversation.pickedUpAttachments, reduceMotion: model.reduceMotion)
                         let asked = Set(conversation.messages.filter { $0.role == .user }.map(\.text))
                         ForEach(picked.openQuestions.filter { !asked.contains($0) }, id: \.self) { question in
                             AskThisRow(question: question) { model.askSuggested(question, in: conversation.id) }
                                 .disabled(store.isRunning(conversation.id))
                         }
                     }
+                    let firstQuestionID = conversation.messages.first(where: { $0.role == .user })?.id
                     ForEach(conversation.messages) { message in
                         MessageBlock(
                             message: message,
                             conversation: conversation,
                             model: model,
-                            hovered: hoveredMessageID == message.id || model.focusedMessageID == message.id
+                            hovered: hoveredMessageID == message.id || session.focusedMessageID == message.id,
+                            keysActive: session.draft.isEmpty && message.id == conversation.messages.last?.id
                         )
                         .id(message.id)
                         .onHover { inside in
                             if inside { hoveredMessageID = message.id } else if hoveredMessageID == message.id { hoveredMessageID = nil }
                         }
+                        if message.id == firstQuestionID, let decision = conversation.routedBy {
+                            RouteCaption(decision: decision, conversation: conversation, model: model)
+                                .padding(.top, -8)
+                        }
                     }
+                    if conversation.isRouting {
+                        HStack(spacing: 8) {
+                            Image(systemName: "sparkles").foregroundStyle(Color.accentColor)
+                            Text("Choosing how to answer…").foregroundStyle(.secondary)
+                            Spacer()
+                            Text("Auto · OpenAI").foregroundStyle(.tertiary)
+                        }
+                        .font(.system(size: 13))
+                        .padding(.vertical, 6)
+                        .transition(.opacity)
+                    }
+                    Color.clear.frame(height: 1).id("end")
+                        .onAppear { atBottom = true }
+                        .onDisappear { atBottom = false }
                 }
                 .padding(.horizontal, 22)
                 .padding(.vertical, 18)
-                .frame(maxWidth: style == .window ? 760 : .infinity, alignment: .leading)
+                .frame(maxWidth: style == .window ? 820 : .infinity, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
-            .frame(minHeight: style == .panel ? 120 : 300, maxHeight: style == .panel ? 520 : .infinity)
-            .fixedSize(horizontal: false, vertical: style == .panel)
-            .onChange(of: conversation.messages.last?.text.count) { scrollToEnd(proxy, conversation) }
-            .onChange(of: conversation.messages.count) { scrollToEnd(proxy, conversation) }
-            .onChange(of: model.focusedMessageID) { _, id in
+            .frame(minHeight: style == .panel ? 120 : 200, maxHeight: transcriptMax)
+            .fixedSize(horizontal: false, vertical: style == .panel && !fillsHeight)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { transcriptHeight = $0 }
+            .onChange(of: scrollSignature(conversation)) { followEnd(proxy) }
+            .onChange(of: conversation.messages.count) { scrollToEnd(proxy) } // a new question always jumps to the end
+            .onChange(of: session.focusedMessageID) { _, id in
                 if let id { withAnimation(Motion.resize(model.reduceMotion)) { proxy.scrollTo(id, anchor: .center) } }
             }
-            .onAppear { scrollToEnd(proxy, conversation) }
+            .onAppear { scrollToEnd(proxy) }
         }
     }
 
-    private func scrollToEnd(_ proxy: ScrollViewProxy, _ conversation: Conversation) {
-        guard let last = conversation.messages.last?.id else { return }
-        proxy.scrollTo(last, anchor: .bottom)
+    /// Anything that grows the last answer: text, steps, cards.
+    private func scrollSignature(_ conversation: Conversation) -> [Int] {
+        guard let last = conversation.messages.last else { return [] }
+        return [last.text.count, last.steps.count, last.permissions.count, last.questions.count,
+                last.subagents.count, last.changes.count, last.isStreaming ? 1 : 0]
+    }
+
+    private func followEnd(_ proxy: ScrollViewProxy) {
+        if atBottom { proxy.scrollTo("end", anchor: .bottom) }
+    }
+
+    private func scrollToEnd(_ proxy: ScrollViewProxy) {
+        proxy.scrollTo("end", anchor: .bottom)
+        atBottom = true
     }
 
     // MARK: Composer
 
     private func composer(_ conversation: Conversation) -> some View {
         let running = store.isRunning(conversation.id)
-        return HStack(spacing: 12) {
-            TextField(placeholder(conversation), text: $model.draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 15))
-                .lineLimit(1...5)
-                .focused($inputFocused)
-                .accessibilityLabel("Follow-up")
-                .onKeyPress(phases: .down) { press in handleKey(press, conversation) }
-            if running {
-                Button { store.stop(conversation.id) } label: { HStack(spacing: 4) { Text("Stop"); Kbd("⌘.") } }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 12))
-                    .keyboardShortcut(".", modifiers: .command)
-            } else {
-                if conversation.keptCount > 0 {
-                    Text("\(conversation.keptCount) kept").font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.keptText)
+        let input = session
+        return VStack(alignment: .leading, spacing: 8) {
+            if input.slashQuery != nil {
+                SlashMenu(model: model, session: input)
+                    .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            if !input.skills.isEmpty || !conversation.pinnedSkills.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(input.skills, id: \.self) { name in
+                        SkillChip(name: name) { input.skills.removeAll { $0 == name } }
+                    }
+                    Spacer(minLength: 4)
+                    if !conversation.pinnedSkills.isEmpty {
+                        Text("Pinned to this chat:").font(.system(size: 11)).foregroundStyle(.secondary)
+                        ForEach(conversation.pinnedSkills, id: \.self) { name in
+                            SkillChip(name: name, pinned: true) { model.unpinSkill(name, in: conversation.id) }
+                        }
+                    }
+                }
+            }
+            if !input.pendingAttachments.isEmpty {
+                AttachmentStrip(attachments: input.pendingAttachments) { model.removeAttachment($0, from: input) }
+            }
+            HStack(alignment: .bottom, spacing: 12) {
+                TextField(placeholder(conversation), text: Bindable(input).draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 15))
+                    .lineLimit(1...8)
+                    .focused($inputFocused)
+                    .accessibilityLabel("Follow-up")
+                    .onKeyPress(phases: .down) { press in handleKey(press, conversation) }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ImageButtons(model: model)
+                if let question = conversation.pendingQuestions.first, let item = question.current, !item.multiSelect {
+                    HStack(spacing: 3) { Kbd("1"); Text("–"); Kbd("\(min(9, item.options.count))"); Text("answer") }
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                if running {
+                    Button { store.stop(conversation.id) } label: { HStack(spacing: 4) { Text("Stop"); Kbd("⌘.") } }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 12))
+                        .keyboardShortcut(".", modifiers: .command)
                 } else {
-                    HStack(spacing: 4) { Kbd("⌘K"); Text("Keep") }.font(.system(size: 12)).foregroundStyle(.secondary)
+                    if conversation.keptCount > 0 {
+                        Text("\(conversation.keptCount) kept").font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.keptText)
+                    } else {
+                        HStack(spacing: 4) { Kbd("⌘K"); Text("Keep") }.font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    if style == .panel {
+                        Button { model.beginShare(conversation.id) } label: {
+                            HStack(spacing: 4) { Text(conversation.pickedUp != nil ? "Share back…" : "Share…"); Kbd("⌘⇧S") }
+                        }
+                        .controlSize(.small)
+                        .disabled(conversation.messages.isEmpty)
+                    }
                 }
-                Button { model.beginShare(conversation.id) } label: {
-                    HStack(spacing: 4) { Text(conversation.pickedUp != nil ? "Share back…" : "Share…"); Kbd("⌘⇧S") }
-                }
-                .controlSize(.small)
-                .disabled(conversation.messages.isEmpty)
             }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
         .frame(minHeight: 54)
+        .background {
+            // ⌘⇧R: "To room" on the focused answer.
+            Button("To room") { model.sendFocusedToRoom(in: conversation.id) }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(!model.roomActive)
+                .opacity(0).allowsHitTesting(false)
+        }
     }
 
     private func placeholder(_ conversation: Conversation) -> String {
+        if !conversation.pendingQuestions.isEmpty { return "Type your own answer…" }
         if conversation.provider.isDeep { return "Reply to \(conversation.provider.displayName)…" }
         return conversation.messages.isEmpty ? "Ask anything…" : "Ask a follow-up…"
     }
 
     private func handleKey(_ press: KeyPress, _ conversation: Conversation) -> KeyPress.Result {
+        let input = session
+        if let result = SlashMenu.handle(press, model: model, session: input) { return result }
         let cmd = press.modifiers.contains(.command)
+        // 1–9 answer a decision while nothing is typed.
+        if !cmd, input.draft.isEmpty, let question = conversation.pendingQuestions.first,
+           let digit = press.characters.first, digit.isNumber,
+           DecisionCard.answer(digit: digit, question: question, conversationID: conversation.id, store: store) {
+            return .handled
+        }
         switch press.key {
         case .return:
-            if cmd { model.onExpand?(conversation.id); return .handled }
+            if cmd {
+                if style == .panel { model.onExpand?(conversation.id) }
+                return .handled
+            }
             if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored } // newline
-            if let last = conversation.messages.last, last.error != nil, model.draft.isEmpty {
+            if let last = conversation.messages.last, last.error != nil, input.draft.isEmpty {
                 store.retry(in: conversation.id); return .handled
             }
             model.submitInChat(conversation.id); return .handled
-        case .upArrow where model.draft.isEmpty:
+        case .upArrow where input.draft.isEmpty:
             model.moveAnswerFocus(-1, in: conversation.id); return .handled
-        case .downArrow where model.draft.isEmpty:
+        case .downArrow where input.draft.isEmpty:
             model.moveAnswerFocus(1, in: conversation.id); return .handled
         case .escape:
-            if style == .panel { model.escape() } else { model.draft = "" }
+            if style == .panel { model.escape() } else { input.draft = "" }
             return .handled
         default:
             break
         }
         guard cmd else { return .ignored }
         switch press.characters {
+        case "v": return model.pasteImageIfAny(into: input) ? .handled : .ignored
         case "k": model.keepFocused(in: conversation.id); return .handled
-        case "c" where model.draft.isEmpty: model.copyFocused(in: conversation.id); return .handled
-        case "p": model.showProviderMenu.toggle(); return .handled
+        case "c" where input.draft.isEmpty: model.copyFocused(in: conversation.id); return .handled
+        case "p" where style == .panel: model.showProviderMenu.toggle(); return .handled
         default:
-            if let digit = press.characters.first, let provider = ProviderKind.allCases.first(where: { $0.shortcutDigit == digit }) {
+            // ⌘1–3 pick the provider in the panel; in the window they switch tabs.
+            if style == .panel, let digit = press.characters.first,
+               let provider = ProviderKind.allCases.first(where: { $0.shortcutDigit == digit }) {
                 model.selectProvider(provider, for: conversation.id); return .handled
             }
             return .ignored
+        }
+    }
+}
+
+/// "From Camille", "Private", "Shared with Jonas".
+struct ChatBadges: View {
+    let conversation: Conversation
+    let reduceMotion: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let picked = conversation.pickedUp {
+                PersonBadge(name: picked.senderName, prefix: "From", tint: Palette.fromTint)
+            }
+            PrivateBadge()
+            if let shared = conversation.sharedWith.last {
+                PersonBadge(name: shared, prefix: "Shared with")
+                    .transition(Motion.pop(reduceMotion))
+            }
+        }
+    }
+}
+
+/// How much the agent may do without asking, per chat.
+struct PermissionLevelMenu: View {
+    let store: ChatStore
+    let conversation: Conversation
+
+    var body: some View {
+        Menu {
+            ForEach(PermissionLevel.allCases) { level in
+                Button {
+                    store.setPermissionLevel(level, for: conversation.id)
+                } label: {
+                    Text(level.label)
+                    Text(level.detail)
+                    if conversation.permissionLevel == level { Image(systemName: "checkmark") }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                Text(conversation.permissionLevel.label)
+            }
+            .font(.system(size: 12))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .padding(.horizontal, 9).frame(height: 22)
+        .background(.quaternary.opacity(0.6), in: Capsule())
+        .help("What the agent may do without asking. Applies from the next message.")
+        .accessibilityLabel("Permissions: \(conversation.permissionLevel.label)")
+    }
+
+    private var icon: String {
+        switch conversation.permissionLevel {
+        case .readOnly: "lock"
+        case .ask: "hand.raised"
+        case .acceptEdits: "pencil"
         }
     }
 }
@@ -201,15 +389,23 @@ struct MessageBlock: View {
     let conversation: Conversation
     let model: PanelModel
     let hovered: Bool
+    var keysActive = false
 
     var body: some View {
         if message.role == .user {
             VStack(alignment: .leading, spacing: 4) {
                 Text("You").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                if !message.skills.isEmpty {
+                    HStack(spacing: 6) { ForEach(message.skills, id: \.self) { SkillChip(name: $0) } }
+                }
                 Text(message.text)
                     .font(.system(size: 15, weight: .semibold))
                     .lineSpacing(2)
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !message.attachments.isEmpty {
+                    AttachmentStrip(attachments: message.attachments, size: 64)
+                }
             }
         } else if let error = message.error {
             ErrorCard(message: error, model: model, conversationID: conversation.id)
@@ -218,29 +414,41 @@ struct MessageBlock: View {
         }
     }
 
+    private func agentName(_ id: String?) -> String? {
+        guard let id, let agent = message.subagents.first(where: { $0.id == id }) else { return nil }
+        return "\(agent.type) subagent"
+    }
+
     private var answer: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Text(message.author).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
                 Spacer()
                 if message.kept { KeptLabel().transition(Motion.pop(model.reduceMotion)) }
             }
-            if !message.steps.isEmpty { StepsList(steps: message.steps, running: message.isStreaming) }
-            if message.isStreaming && message.text.isEmpty && message.steps.isEmpty {
-                ThinkingRow(provider: conversation.provider, reduceMotion: model.reduceMotion)
-            } else if !message.text.isEmpty {
-                (Text(markdown: message.text) + Text(message.isStreaming ? " ▍" : "").foregroundStyle(Color.accentColor))
-                    .font(.system(size: 14))
-                    .lineSpacing(3)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            ForEach(message.editRequests) { request in
-                EditRequestCard(request: request, provider: conversation.provider,
-                                busy: model.store.isRunning(conversation.id)) {
-                    model.store.allowEdits(messageID: message.id, in: conversation.id)
+            if !message.subagents.isEmpty {
+                SubagentLanes(subagents: message.subagents, filtered: model.activityFilter[conversation.id]) { id in
+                    model.activityFilter[conversation.id] = model.activityFilter[conversation.id] == id ? nil : id
+                    if !model.showTerminal { model.toggleTerminal() }
                 }
             }
+            if !message.steps.isEmpty { StepsSummary(steps: message.steps, running: message.isStreaming, model: model) }
+            if message.isStreaming && message.text.isEmpty && message.steps.isEmpty && message.subagents.isEmpty {
+                ThinkingRow(provider: conversation.provider, reduceMotion: model.reduceMotion)
+            } else if !message.text.isEmpty {
+                MarkdownView(message.text, fontSize: 14, streaming: message.isStreaming)
+            }
+            ForEach(message.questions) { question in
+                DecisionCard(question: question, conversationID: conversation.id, store: model.store,
+                             askedBy: agentName(question.agentID), keysActive: keysActive)
+            }
+            ForEach(message.permissions) { request in
+                PermissionCard(request: request, conversation: conversation, store: model.store, askedBy: agentName(request.agentID))
+            }
+            if !message.changes.isEmpty && !message.isStreaming {
+                ChangesCard(changes: message.changes, folder: conversation.folder)
+            }
+            if let warning = message.warning { WarningRow(text: warning) }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -279,6 +487,14 @@ struct AnswerToolbar: View {
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 8).frame(height: 24)
+            if model.roomActive, let conversation = model.store.conversation(conversationID) {
+                Button { model.onSendToRoom?(message, conversation) } label: {
+                    HStack(spacing: 5) { Image(systemName: "square.grid.2x2"); Text("To room"); Kbd("⌘⇧R") }
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8).frame(height: 24)
+                .help("Put this answer on the room’s table. The rest of the chat stays private.")
+            }
             Button {
                 withAnimation(Motion.keep(model.reduceMotion)) { model.store.toggleKeep(message.id, in: conversationID) }
             } label: {
@@ -307,7 +523,7 @@ struct ThinkingRow: View {
             HStack(spacing: 10) {
                 Text("Thinking…").font(.system(size: 13)).foregroundStyle(.secondary)
                 Spacer()
-                Text(provider == .openRouter ? "OpenRouter · \(OpenRouterSettings.model.replacingOccurrences(of: "openrouter/", with: ""))" : provider.displayName)
+                Text(provider == .openAI ? "OpenAI · \(OpenAISettings.model)" : provider.displayName)
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
         }
@@ -320,16 +536,27 @@ struct ErrorCard: View {
     let model: PanelModel
     let conversationID: UUID
 
+    private var provider: ProviderKind? { model.store.conversation(conversationID)?.provider }
+    /// Settings can only help with the OpenAI key or a missing CLI.
+    private var settingsHelps: Bool {
+        provider == .openAI || message == ProviderError.missingKey.errorDescription || message.hasSuffix("isn’t installed on this Mac.")
+            || message.hasSuffix("isn't installed on this Mac.")
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle").foregroundStyle(.red).font(.system(size: 16))
             VStack(alignment: .leading, spacing: 2) {
                 Text(headline).font(.system(size: 13, weight: .semibold))
                 Text(message).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
                 Text("Your question is still here.").font(.system(size: 12)).foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Settings…") { model.onOpenSettings?() }.controlSize(.small)
+            if settingsHelps { Button("Settings…") { model.onOpenSettings?() }.controlSize(.small) }
+            if message == ProviderError.noFolder.errorDescription {
+                Button("Choose Folder…") { model.onChooseFolder?(conversationID) }.controlSize(.small)
+            }
             Button("Retry ↵") { model.store.retry(in: conversationID) }
                 .controlSize(.small)
                 .buttonStyle(.borderedProminent)
@@ -340,94 +567,85 @@ struct ErrorCard: View {
     }
 
     private var headline: String {
-        if message.contains("API key") { return "Add your OpenRouter key" }
-        if message.contains("folder") { return "Choose a project folder" }
-        return model.store.conversation(conversationID)?.provider == .openRouter ? "OpenRouter didn’t respond" : "The agent stopped"
+        for error in [ProviderError.missingKey, .noFolder, .badResponse] where error.errorDescription == message { return error.headline }
+        if message.hasSuffix("installed on this Mac.") { return ProviderError.notInstalled("").headline }
+        if message.contains("rejected the API key") { return ProviderError.missingKey.headline }
+        return provider == .openAI ? ProviderError.badResponse.headline : ProviderError.process("").headline
     }
 }
 
 // MARK: - Deep chat pieces (board 6 · 02)
 
-struct StepsList: View {
+/// One line in the chat for the agent's work; the details live in the activity pane (⌥⌘A).
+struct StepsSummary: View {
     let steps: [ToolStep]
     let running: Bool
+    let model: PanelModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(steps) { step in
-                HStack(spacing: 8) {
-                    if !step.done && running {
-                        ProgressView().controlSize(.mini).frame(width: 12, height: 12)
-                    } else if step.failed {
-                        Image(systemName: "xmark").foregroundStyle(.red).frame(width: 12)
-                    } else if step.label == "Wants to edit" {
-                        Image(systemName: "pencil").foregroundStyle(Color.accentColor).frame(width: 12)
-                    } else {
-                        Image(systemName: "checkmark").foregroundStyle(.green).frame(width: 12)
-                    }
-                    Text(step.label + (step.kind == .search && step.label == "Searched" ? "" : ""))
-                    Text(step.detail).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+        Button { if !model.showTerminal { model.toggleTerminal() } } label: {
+            HStack(spacing: 8) {
+                if running && steps.contains(where: { !$0.done }) {
+                    ProgressView().controlSize(.mini).frame(width: 12, height: 12)
+                } else if steps.contains(where: \.failed) {
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                } else {
+                    Image(systemName: "checkmark").foregroundStyle(.green)
                 }
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.secondary)
-                .frame(height: 22)
+                Text(summary).foregroundStyle(.secondary)
+                if let current = running ? steps.last(where: { !$0.done }) ?? steps.last : nil {
+                    Text("· \(current.label) \(current.detail)")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                if !model.showTerminal {
+                    HStack(spacing: 4) { Text("Activity"); Kbd("⌥⌘A") }.foregroundStyle(.secondary)
+                }
             }
+            .font(.system(size: 12))
+            .padding(.horizontal, 10).frame(height: 28)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(Rectangle())
         }
-        .font(.system(size: 12))
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .buttonStyle(.plain)
+        .help(model.showTerminal ? "Details are in the activity pane" : "Show the activity pane (⌥⌘A)")
+    }
+
+    private var summary: String {
+        let main = steps.filter { $0.agentID == nil }
+        let commands = main.filter { $0.kind == .command || $0.kind == .search }.count
+        let reads = main.filter { $0.kind == .read }.count
+        let edits = main.filter { $0.kind == .edit }.count
+        var parts: [String] = []
+        if reads > 0 { parts.append("read \(reads) file\(reads == 1 ? "" : "s")") }
+        if commands > 0 { parts.append("ran \(commands) command\(commands == 1 ? "" : "s")") }
+        if edits > 0 { parts.append("\(edits) edit\(edits == 1 ? "" : "s")") }
+        let sub = steps.count - main.count
+        if sub > 0 { parts.append("\(sub) by subagents") }
+        let text = parts.isEmpty ? "\(steps.count) step\(steps.count == 1 ? "" : "s")" : parts.joined(separator: ", ")
+        return text.prefix(1).uppercased() + text.dropFirst()
     }
 }
 
-struct EditRequestCard: View {
-    let request: EditRequest
-    let provider: ProviderKind
-    let busy: Bool
-    let onAllow: () -> Void
-    @State private var showDiff = false
+/// Screenshot capture + image picker, used by the home input and the chat composer.
+struct ImageButtons: View {
+    let model: PanelModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                if request.id == "codex-edits" {
-                    Text("\(provider.displayName) wants to edit files in this folder.").font(.system(size: 13))
-                } else {
-                    (Text("Edit ") + Text(request.fileName).font(.system(size: 12, design: .monospaced))
-                        + Text(request.addedLines > 0 ? " (+\(request.addedLines) lines)?" : "?"))
-                        .font(.system(size: 13))
-                }
-                Spacer()
-                if request.id != "codex-edits" {
-                    Button(showDiff ? "Hide diff" : "Show diff") { showDiff.toggle() }.controlSize(.small)
-                }
-                switch request.status {
-                case .pending:
-                    Button("Allow", action: onAllow).controlSize(.small).buttonStyle(.borderedProminent).disabled(busy)
-                case .allowed, .applied:
-                    Label("Allowed", systemImage: "checkmark").font(.system(size: 12)).foregroundStyle(.green)
-                }
-            }
-            if showDiff {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(request.oldText.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                        Text("- " + line).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.red.opacity(0.06))
-                    }
-                    ForEach(Array(request.newText.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                        Text("+ " + line).foregroundStyle(.green).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.green.opacity(0.06))
-                    }
-                }
-                .font(.system(size: 11, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(8)
-                .background(.background, in: RoundedRectangle(cornerRadius: 6))
-            }
+        HStack(spacing: 10) {
+            Button { model.onCaptureScreenshot?() } label: { Image(systemName: "camera.viewfinder") }
+                .help("Attach a screenshot: drag over an area, or press space for a window")
+                .accessibilityLabel("Attach a screenshot")
+            Button { model.onPickImages?() } label: { Image(systemName: "paperclip") }
+                .help("Attach images (or paste with ⌘V, or drop them here)")
+                .accessibilityLabel("Attach images")
         }
-        .padding(10)
-        .background(Color.accentColor.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 0.5))
+        .buttonStyle(.borderless)
+        .font(.system(size: 14))
+        .foregroundStyle(.secondary)
+        .frame(height: 20)
     }
 }
 
@@ -435,19 +653,44 @@ struct FolderChip: View {
     let model: PanelModel
     let conversation: Conversation
 
+    private var folders: FolderShortcutStore { model.store.folders }
+
     var body: some View {
-        Button { model.onChooseFolder?(conversation.id) } label: {
+        Menu {
+            ForEach(folders.shortcuts) { shortcut in
+                Button {
+                    model.store.setFolder(shortcut.url, for: conversation.id)
+                } label: {
+                    Text("/\(shortcut.name)  \(shortcut.display)")
+                    if conversation.folder.map({ folders.shortcut(for: $0)?.id == shortcut.id }) == true { Image(systemName: "checkmark") }
+                }
+                .disabled(!shortcut.exists)
+            }
+            if !folders.shortcuts.isEmpty { Divider() }
+            Button("Choose Folder…") { model.onChooseFolder?(conversation.id) }
+            if let folder = conversation.folder, folders.shortcut(for: folder) == nil {
+                Button("Save as Shortcut /\(FolderShortcutStore.slug(folder.lastPathComponent))") {
+                    let shortcut = folders.add(folder)
+                    model.peers.notice = "Saved. Type /\(shortcut.name) to use \(shortcut.display)."
+                }
+            }
+        } label: {
             HStack(spacing: 5) {
                 Image(systemName: "folder")
-                Text(conversation.folder.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "Choose folder…")
-                    .lineLimit(1).truncationMode(.head)
+                Text(label).lineLimit(1).truncationMode(.head).frame(maxWidth: 180)
             }
             .font(.system(size: 12))
-            .padding(.horizontal, 9).frame(height: 22)
-            .background(.quaternary.opacity(0.6), in: Capsule())
         }
-        .buttonStyle(.plain)
-        .frame(maxWidth: 220)
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .padding(.horizontal, 9).frame(height: 22)
+        .background(.quaternary.opacity(0.6), in: Capsule())
         .help("Project folder the agent works in")
+    }
+
+    private var label: String {
+        guard let folder = conversation.folder else { return "Choose folder…" }
+        if let shortcut = folders.shortcut(for: folder) { return "/\(shortcut.name)" }
+        return FolderDrop.display(folder)
     }
 }

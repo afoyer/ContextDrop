@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-/// Minimal generic-password Keychain wrapper for the OpenRouter API key.
+/// Minimal generic-password Keychain wrapper for the OpenAI API key.
 enum Keychain {
     private static let service = "edu.cmu.hackathon.ContextDrop"
 
@@ -35,10 +35,10 @@ enum Keychain {
     }
 }
 
-enum OpenRouterSettings {
-    static let keyAccount = "openrouter-api-key"
-    static let modelDefaultsKey = "ContextDrop.openRouterModel"
-    static let defaultModel = "openrouter/auto"
+enum OpenAISettings {
+    static let keyAccount = "openai-api-key"
+    static let modelDefaultsKey = "ContextDrop.openAIModel"
+    static let defaultModel = "gpt-4.1-mini"
 
     /// In-memory copy of the Keychain item. Keychain reads can block on a system approval prompt
     /// (every ad-hoc rebuild is a "new app" to the Keychain), so they never happen on the main thread.
@@ -46,17 +46,29 @@ enum OpenRouterSettings {
         let lock = NSLock()
         var stored: String?
         var loaded = false
+        var loading: Task<String?, Never>?
     }
     private static let cache = Cache()
 
     /// Loads the key off the main thread once at launch.
     static func preload() async {
-        let value = await Task.detached(priority: .userInitiated) {
-            Keychain.read(keyAccount)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        }.value
+        let pending: Task<String?, Never>? = cache.lock.withLock {
+            if cache.loaded { return nil }
+            if let loading = cache.loading { return loading }
+            let task = Task.detached(priority: .userInitiated) {
+                Keychain.read(keyAccount)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            cache.loading = task
+            return task
+        }
+        guard let pending else { return }
+        let value = await pending.value
         cache.lock.withLock {
-            cache.stored = (value?.isEmpty ?? true) ? nil : value
-            cache.loaded = true
+            if !cache.loaded {
+                cache.stored = (value?.isEmpty ?? true) ? nil : value
+                cache.loaded = true
+            }
+            cache.loading = nil
         }
     }
 
@@ -83,7 +95,7 @@ enum OpenRouterSettings {
     static func apiKey() -> String? {
         cache.lock.lock(); let stored = cache.stored; cache.lock.unlock()
         if let stored { return stored }
-        if let env = ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"], !env.isEmpty { return env }
+        if let env = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !env.isEmpty { return env }
         return nil
     }
 

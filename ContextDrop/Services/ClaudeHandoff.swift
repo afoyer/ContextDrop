@@ -25,7 +25,7 @@ enum ClaudeHandoff {
     }
 
     static func claudeLink(_ conversation: Conversation) -> Link {
-        let via = conversation.provider == .openRouter ? "" : " with \(conversation.provider.displayName)"
+        let via = conversation.provider == .openAI ? "" : " with \(conversation.provider.displayName)"
         let intro = "Here's a conversation I had in ContextDrop\(via). Pick it up from where it left off.\n\n"
         let body = markdown(conversation)
         let budget = maxPromptCharacters - intro.count
