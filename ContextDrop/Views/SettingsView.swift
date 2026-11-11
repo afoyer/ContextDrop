@@ -78,6 +78,7 @@ private struct ProviderSettingsTab: View {
     @State private var keyMessage: String?
     @AppStorage("ContextDrop.permissionLevel") private var permissionLevel = "ask"
     @AppStorage(AppDefaults.delegateKey) private var delegateAgents = false
+    @State private var detail = OpenAIDetail.preferred
 
     var body: some View {
         Form {
@@ -102,6 +103,12 @@ private struct ProviderSettingsTab: View {
                     .onSubmit { saveModel() }
                     .onChange(of: model) { saveModel() }
                 Text("Model for quick answers and share summaries. A light model keeps it fast; empty = gpt-4.1-mini.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Images and PDFs in room chats", selection: $detail) {
+                    ForEach(OpenAIDetail.allCases) { Text($0.label).tag($0) }
+                }
+                .onChange(of: detail) { OpenAIDetail.preferred = detail }
+                Text("How closely the model looks at images and PDF pages. High reads small text but uses more tokens.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Deep chats") {

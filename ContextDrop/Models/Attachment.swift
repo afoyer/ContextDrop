@@ -10,9 +10,15 @@ struct Attachment: Codable, Hashable, Identifiable, Sendable {
     var name: String
     /// True for a file reference (not an image copied into the Attachments folder).
     var isReference: Bool? = nil
+    /// A pasted web link. It has no file: the address itself goes to the assistant.
+    var link: String? = nil
+    /// True for a block of text that was pasted and tucked away as a file.
+    var isPastedText: Bool? = nil
 
-    var url: URL { URL(fileURLWithPath: path) }
+    var url: URL { link.flatMap(URL.init(string:)) ?? URL(fileURLWithPath: path) }
     var isImage: Bool { isReference != true }
+    /// Images and files count toward the per-message limit; pasted links and text do not.
+    var countsTowardLimit: Bool { link == nil && isPastedText != true }
 }
 
 /// Saving, importing and capturing images for chats. Everything is copied into one folder so the CLIs
@@ -41,9 +47,48 @@ enum Attachments {
         return Attachment(id: UUID(), path: url.standardizedFileURL.path, name: url.lastPathComponent, isReference: true)
     }
 
+    // MARK: Pasted links and text
+
+    /// Pasted text longer than this (in lines or characters) becomes a chip instead of filling the input.
+    static let pastedTextMaxLines = 8
+    static let pastedTextMaxCharacters = 800
+
+    /// A chip for a pasted web address, or nil when the text is anything other than one http(s) link.
+    static func link(_ text: String) -> Attachment? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 2_000, !trimmed.contains(where: \.isWhitespace),
+              let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = url.host(), host.contains(".") || host == "localhost" else { return nil }
+        // Shown as "host/last-part": enough to tell two links apart.
+        var name = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        let last = url.lastPathComponent
+        if !last.isEmpty, last != "/" { name += (url.pathComponents.count > 2 ? "/…/" : "/") + last }
+        return Attachment(id: UUID(), path: "", name: name, isReference: true, link: trimmed)
+    }
+
+    static func isLongPaste(_ text: String) -> Bool {
+        if text.count > pastedTextMaxCharacters { return true }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count > pastedTextMaxLines
+    }
+
+    /// Saves a long pasted text as a file in the attachments folder, so it rides along like any attached file.
+    static func pastedText(_ text: String) -> Attachment? {
+        let id = UUID()
+        let dest = directory.appendingPathComponent("\(id.uuidString).txt")
+        guard (try? Data(text.utf8).write(to: dest)) != nil else { return nil }
+        let lines = text.trimmingCharacters(in: .whitespacesAndNewlines).split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
+        let size = lines > 1 ? "\(lines) lines" : "\(text.count.formatted()) characters"
+        return Attachment(id: id, path: dest.path, name: "Pasted text · \(size)", isReference: true, isPastedText: true)
+    }
+
     /// Text of a small referenced file, for assistants that can't read files themselves.
     static func inlineText(_ attachment: Attachment, limit: Int = 30_000) -> String? {
-        guard attachment.isReference == true, let data = try? Data(contentsOf: attachment.url, options: .mappedIfSafe),
+        attachment.isReference == true && attachment.link == nil ? inlineText(at: attachment.url, limit: limit) : nil
+    }
+
+    /// Text of a small UTF-8 file, cut to `limit` characters. Nil when it is too large or not text.
+    static func inlineText(at url: URL, limit: Int = 30_000) -> String? {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
               data.count <= 400_000, let text = String(data: data, encoding: .utf8) else { return nil }
         return text.count > limit ? String(text.prefix(limit)) + "\n… (cut)" : text
     }

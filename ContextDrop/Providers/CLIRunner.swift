@@ -587,6 +587,19 @@ enum CLIRunner {
                             break
                         }
                         if name == "AskUserQuestion" { break } // shown as a decision card
+                        if name == "TodoWrite", agent == nil, let todos = input["todos"] as? [[String: Any]] {
+                            let plan = todos.compactMap { todo -> RunPlanStep? in
+                                guard let text = todo["content"] as? String, !text.isEmpty else { return nil }
+                                let status: RunPlanStep.Status
+                                switch todo["status"] as? String {
+                                case "completed": status = .done
+                                case "in_progress": status = .active
+                                default: status = .pending
+                                }
+                                return RunPlanStep(text: text, status: status)
+                            }
+                            events.append(.plan(plan))
+                        }
                         var step = claudeStep(id: id, name: name, input: input)
                         step.agentID = agent
                         events.append(.step(step))

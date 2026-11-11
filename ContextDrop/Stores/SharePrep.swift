@@ -51,7 +51,7 @@ final class SharePrep {
         title = conversation.title
         transcriptCount = conversation.messages.filter { $0.error == nil && !$0.text.isEmpty }.count
         fileNames = conversation.referencedFileNames
-        screenshots = Array(conversation.allAttachments.suffix(Self.maxSharedImages))
+        screenshots = Array(conversation.allAttachments.filter(\.isImage).suffix(Self.maxSharedImages))
         // Kept answers always travel. Pair each with the question right before it.
         var items: [KeptItem] = []
         for (index, message) in conversation.messages.enumerated() where message.kept {

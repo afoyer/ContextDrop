@@ -256,7 +256,7 @@ struct MenuBarView: View {
             if room.isActive, let state = room.room {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(state.name).font(.system(size: 12.5, weight: .medium)).lineLimit(1)
-                    Text("\(room.members.count) here · \(state.cards.count) card\(state.cards.count == 1 ? "" : "s")")
+                    Text("\(room.members.count) here · \(state.tiles.count) tile\(state.tiles.count == 1 ? "" : "s")")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Spacer()

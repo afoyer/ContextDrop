@@ -71,6 +71,8 @@ final class PanelModel {
     /// Activity log filter per chat: nil = all, "main", or a subagent id.
     var activityFilter: [UUID: String] = [:]
     var prep: SharePrep?
+    @ObservationIgnored private var summaryTask: Task<Void, Never>?
+    @ObservationIgnored private var summaryToken: UUID?
     /// Several tabs being shared together.
     var multiShare: MultiSharePrep?
     /// Tabs travelling with the share in `.send` (the first one is the mode's share).
@@ -105,6 +107,8 @@ final class PanelModel {
     @ObservationIgnored var onOpenRoom: (() -> Void)?
     /// "To room": puts an answer on the table of the room you're in.
     @ObservationIgnored var onSendToRoom: ((Message, Conversation) -> Void)?
+    /// "To room" on a whole tab: a Claude Code run becomes a run tile, an OpenAI chat a chat tile.
+    @ObservationIgnored var onSendTabToRoom: ((Conversation) -> Void)?
     /// Whether "To room" is offered (you're in a live room).
     var roomActive = false
 
@@ -299,9 +303,13 @@ final class PanelModel {
 
     func attach(_ items: [Attachment], to target: ChatSession? = nil) {
         let session = target ?? activeSession
-        let room = Attachments.maxPerMessage - session.pendingAttachments.count
-        guard room > 0 else { peers.notice = "Up to \(Attachments.maxPerMessage) attachments per message."; return }
-        withAnimation(Motion.keep(reduceMotion)) { session.pendingAttachments += items.prefix(room) }
+        // The limit is for images and files. Pasted links and text are only text, so they don't count.
+        let free = items.filter { !$0.countsTowardLimit }
+        let limited = items.filter(\.countsTowardLimit)
+        let room = Attachments.maxPerMessage - session.pendingAttachments.filter(\.countsTowardLimit).count
+        if !limited.isEmpty, room <= 0 { peers.notice = "Up to \(Attachments.maxPerMessage) images or files per message." }
+        guard !free.isEmpty || room > 0 else { return }
+        withAnimation(Motion.keep(reduceMotion)) { session.pendingAttachments += free + limited.prefix(max(room, 0)) }
         session.requestFocus()
         focusToken += 1
     }
@@ -311,8 +319,30 @@ final class PanelModel {
         withAnimation(Motion.keep(reduceMotion)) { session.pendingAttachments.removeAll { $0.id == id } }
     }
 
-    /// ⌘V with an image (or copied image files) on the clipboard. Returns false to let a normal text paste happen.
-    func pasteImageIfAny(into target: ChatSession? = nil) -> Bool {
+    /// ⌘V with something that should not fill the input: an image (or copied image files), a web link,
+    /// or a long block of text. Each becomes a chip above the input. Returns false to let a normal text paste happen.
+    func pasteAsAttachment(into target: ChatSession? = nil) -> Bool {
+        pasteImageIfAny(into: target) || pasteLinkOrLongText(into: target)
+    }
+
+    /// ⌘V seen by a window's key monitor, before the text field pastes. Only acts while a text field is being typed in.
+    func pasteKey(in window: NSWindow?, session: ChatSession) -> Bool {
+        guard window?.firstResponder is NSTextView else { return false }
+        return pasteAsAttachment(into: session)
+    }
+
+    private func pasteLinkOrLongText(into target: ChatSession?) -> Bool {
+        let session = target ?? activeSession
+        guard NSPasteboard.general.availableType(from: [.fileURL]) == nil,
+              let text = NSPasteboard.general.string(forType: .string) else { return false }
+        guard let item = Attachments.link(text) ?? (Attachments.isLongPaste(text) ? Attachments.pastedText(text) : nil) else { return false }
+        // The same link twice is one chip.
+        if let link = item.link, session.pendingAttachments.contains(where: { $0.link == link }) { return true }
+        attach([item], to: target)
+        return true
+    }
+
+    private func pasteImageIfAny(into target: ChatSession? = nil) -> Bool {
         guard Attachments.pasteboardHasImage() else { return false }
         // Text wins when the clipboard has both (e.g. copying from a web page).
         if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty,
@@ -719,9 +749,13 @@ final class PanelModel {
         input.focusedMessageID = target
     }
 
-    /// ⌘⇧R: put the focused (or latest) answer on the room's table.
+    /// ⌘⇧R: put the focused (or latest) answer in the room. For a Claude Code chat, the run itself goes in.
     func sendFocusedToRoom(in id: UUID) {
         guard roomActive, let conversation = store.conversation(id) else { return }
+        if conversation.provider == .claudeCode {
+            onSendTabToRoom?(conversation)
+            return
+        }
         let input = session(id)
         guard let message = conversation.messages.first(where: { $0.id == input.focusedMessageID })
                 ?? conversation.messages.last(where: { $0.role == .assistant && $0.error == nil && !$0.text.isEmpty }) else { return }
@@ -843,12 +877,19 @@ final class PanelModel {
     }
 
     private func summarize(_ prep: SharePrep, conversation: Conversation) {
+        summaryTask?.cancel()
+        let token = UUID()
+        summaryToken = token
+        let detail = prep.detail
         prep.phase = .summarizing
-        Task { @MainActor in
+        summaryTask = Task { @MainActor in
+            defer { if summaryToken == token { summaryTask = nil; summaryToken = nil } }
             do {
-                let draft = try await OpenAIClient.fromSettings().summarize(conversation, detail: prep.detail)
+                let draft = try await OpenAIClient.fromSettings().summarize(conversation, detail: detail)
+                guard !Task.isCancelled, summaryToken == token, self.prep === prep else { return }
                 withAnimation(Motion.streaming(reduceMotion)) { prep.apply(draft) }
             } catch {
+                guard !Task.isCancelled, summaryToken == token, self.prep === prep else { return }
                 prep.phase = .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
                 // Still allow a hand-written summary.
                 if prep.summary.isEmpty { prep.isEditingSummary = true }

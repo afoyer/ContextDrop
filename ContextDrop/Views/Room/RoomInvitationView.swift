@@ -42,7 +42,7 @@ struct RoomInvitationView: View {
             }
             .accessibilityElement(children: .combine)
 
-            Text("Your chats stay private. Only cards you put on the table are shared.")
+            Text("Your own chats stay private. Only what you put in the room is shared.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

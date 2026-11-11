@@ -83,6 +83,8 @@ struct TerminalState: Sendable {
     var subagents: [Subagent] = []
     /// Files changed in the latest run.
     var changes: [FileChange] = []
+    /// The agent's own to-do list, when the run keeps one.
+    var plan: [RunPlanStep] = []
 
     mutating func append(_ kind: TerminalLine.Kind, _ text: String, agent: String? = nil) {
         lines.append(TerminalLine(kind: kind, text: text, agentID: agent))

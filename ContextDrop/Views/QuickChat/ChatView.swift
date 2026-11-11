@@ -308,7 +308,7 @@ struct ChatView: View {
         }
         guard cmd else { return .ignored }
         switch press.characters {
-        case "v": return model.pasteImageIfAny(into: input) ? .handled : .ignored
+        case "v": return model.pasteAsAttachment(into: input) ? .handled : .ignored
         case "k": model.keepFocused(in: conversation.id); return .handled
         case "c" where input.draft.isEmpty: model.copyFocused(in: conversation.id); return .handled
         case "p" where style == .panel: model.showProviderMenu.toggle(); return .handled

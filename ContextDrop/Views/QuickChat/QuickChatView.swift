@@ -278,7 +278,7 @@ struct HomeView: View {
         if press.modifiers.contains(.command), press.characters == "p" {
             model.showProviderMenu.toggle(); return .handled
         }
-        if press.modifiers.contains(.command), press.characters == "v", model.pasteImageIfAny(into: model.homeSession) {
+        if press.modifiers.contains(.command), press.characters == "v", model.pasteAsAttachment(into: model.homeSession) {
             return .handled
         }
         if press.modifiers.contains(.command), press.characters == "v", model.draft.isEmpty,

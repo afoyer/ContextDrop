@@ -165,7 +165,7 @@ extension Text {
 // MARK: Palette (system colors; light/dark aware)
 
 enum Palette {
-    private static func dynamic(light: NSColor, dark: NSColor) -> Color {
+    static func dynamic(light: NSColor, dark: NSColor) -> Color {
         Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light })
     }
 
@@ -209,10 +209,18 @@ struct AttachmentThumb: View {
     var body: some View {
         Button { NSWorkspace.shared.open(attachment.url) } label: {
             if !attachment.isImage {
-                // A file reference: icon and name (the agent reads the file itself).
+                // A file reference (the agent reads the file itself), a pasted link, or a pasted block of text.
                 HStack(spacing: 6) {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: attachment.path)).resizable().frame(width: 18, height: 18)
-                    Text(attachment.name).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                    if attachment.link != nil {
+                        Image(systemName: "link").font(.system(size: 12, weight: .semibold)).foregroundStyle(.tint).frame(width: 18, height: 18)
+                    } else if attachment.isPastedText == true {
+                        Image(systemName: "text.alignleft").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).frame(width: 18, height: 18)
+                    } else {
+                        Image(nsImage: NSWorkspace.shared.icon(forFile: attachment.path)).resizable().frame(width: 18, height: 18)
+                    }
+                    Text(attachment.name)
+                        .font(.system(size: 12, design: attachment.isPastedText == true ? .default : .monospaced))
+                        .lineLimit(1).truncationMode(.middle)
                 }
                 .padding(.horizontal, 9)
                 .frame(maxWidth: 220, minHeight: min(size, 30), maxHeight: min(size, 30))
@@ -231,8 +239,8 @@ struct AttachmentThumb: View {
             }
         }
         .buttonStyle(.plain)
-        .help(attachment.isImage ? attachment.name : attachment.path)
-        .accessibilityLabel(attachment.isImage ? "Image \(attachment.name)" : "File \(attachment.name)")
+        .help(attachment.isImage ? attachment.name : attachment.link ?? (attachment.isPastedText == true ? "Pasted text. Click to open it." : attachment.path))
+        .accessibilityLabel(attachment.isImage ? "Image \(attachment.name)" : attachment.link != nil ? "Link \(attachment.name)" : attachment.isPastedText == true ? attachment.name : "File \(attachment.name)")
         .overlay(alignment: .topTrailing) {
             if let onRemove {
                 Button(action: onRemove) {

@@ -136,6 +136,10 @@ final class WorkspaceWindowController: NSObject, NSWindowDelegate {
         }
         guard flags == .command else { return false }
         switch key {
+        case "v":
+            // A link or a long text becomes a chip instead of filling the input.
+            guard let id = workspace.selected else { return false }
+            return model.pasteKey(in: window, session: model.session(id))
         case "t": newTab(); return true
         case "w":
             if let id = workspace.selected { closeTab(id) } else { window?.orderOut(nil) }
@@ -221,6 +225,18 @@ struct WorkspaceView: View {
                         .buttonStyle(.borderless)
                         .help(model.showTerminal ? "Hide activity (⌥⌘A)" : "Show activity (⌥⌘A)")
                         .accessibilityLabel(model.showTerminal ? "Hide activity" : "Show activity")
+                }
+                if model.roomActive, conversation.provider != .codex, !conversation.messages.isEmpty {
+                    Button { model.onSendTabToRoom?(conversation) } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "square.grid.2x2")
+                            Text("To room")
+                        }
+                    }
+                    .controlSize(.small)
+                    .help(conversation.provider == .claudeCode
+                          ? "Put this run in the room. Others can watch; only you approve edits or stop it."
+                          : "Put this chat in the room. Anyone there can reply; it answers from your Mac.")
                 }
                 Button { share(conversation) } label: {
                     HStack(spacing: 4) {

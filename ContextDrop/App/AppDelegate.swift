@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         panelModel.onShow = { [weak self] in self?.quickChat.show() }
         panelModel.onOpenRoom = { [weak self] in self?.openRoom() }
         panelModel.onSendToRoom = { [weak self] message, conversation in self?.sendToRoom(message, from: conversation) }
+        panelModel.onSendTabToRoom = { [weak self] conversation in self?.sendTabToRoom(conversation) }
 
         // What counts as "on screen" (never unseen), and which empty chats must survive.
         store.visibleConversations = { [weak self] in
@@ -74,16 +75,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         peers.start()
 
+        // The room reads this Mac's Claude Code runs (to summarise the ones put in the room) and
+        // opens what is taken home as a private chat. It never sends a private chat on its own.
+        roomStore.chats = store
         roomStore.onChange = { [weak self] in
             guard let self else { return }
             self.panelModel.roomActive = self.roomStore.isActive
+            self.roomWindow.roomChanged()
             self.menuBar.refresh()
+        }
+        roomWindow.onOpenOwnRun = { [weak self] tileID in
+            guard let self, let id = self.roomStore.runs.conversationID(for: tileID), self.store.conversation(id) != nil else { return }
+            self.openInWorkspace(id)
+        }
+        roomWindow.onTakeHome = { [weak self] share in
+            guard let self else { return }
+            self.openInWorkspace(self.store.continueFrom(share))
         }
         roomStore.onInvitation = { [weak self] invitation in
             guard let self else { return }
             self.notifications.show(invitation, store: self.roomStore) { [weak self] in self?.roomWindow.show() }
             self.menuBar.refresh()
         }
+
+        #if DEBUG
+        DebugRoomDemo.start(room: roomStore, openRoom: { [weak self] in self?.openRoom() }, showRoom: { [weak self] in self?.roomWindow.show() })
+        #endif
 
         UNUserNotificationCenter.current().delegate = self
         Task { [weak self] in
@@ -214,11 +231,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         roomWindow.show()
     }
 
-    /// "To room": only this answer goes on the table; the chat it came from stays private.
+    /// "To room" on an answer: only this answer goes in the room; the chat it came from stays private.
     private func sendToRoom(_ message: Message, from conversation: Conversation) {
         guard roomStore.isActive, !message.text.isEmpty else { return }
-        roomStore.addCard(kind: .keptAnswer, text: message.text, caption: conversation.title)
+        guard roomStore.addCard(kind: .keptAnswer, text: message.text, caption: conversation.title) != nil else { return }
         panelModel.peers.notice = "Added to the room. The rest of this chat stays private."
+    }
+
+    /// "To room" on a tab: a Claude Code chat becomes a live, watch-only run tile; an OpenAI chat becomes a
+    /// chat tile everyone can reply in. Either way it keeps running on this Mac.
+    private func sendTabToRoom(_ conversation: Conversation) {
+        guard roomStore.isActive else { return }
+        if conversation.provider == .claudeCode {
+            guard roomStore.shareRun(conversation) != nil else { return }
+            panelModel.peers.notice = "This run is in the room. Others can watch; only you approve edits or stop it. Secrets in the log are hidden."
+        } else if conversation.provider == .openAI {
+            guard roomStore.shareChat(conversation) != nil else { return }
+            panelModel.peers.notice = "This chat is in the room as a copy. Anyone there can reply; it answers from your Mac."
+        } else {
+            panelModel.peers.notice = "Only Claude Code runs and OpenAI chats can go in a room for now."
+            return
+        }
+        roomWindow.show()
     }
 
     // MARK: Settings

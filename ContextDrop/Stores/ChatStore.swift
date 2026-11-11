@@ -42,6 +42,8 @@ final class ChatStore {
     @ObservationIgnored var keepEmptyConversations: () -> Set<UUID> = { [] }
     @ObservationIgnored private var runningTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var cliHandles: [UUID: CLIRunner.Handle] = [:]
+    @ObservationIgnored private var routingTokens: [UUID: UUID] = [:]
+    @ObservationIgnored private var retryApprovals: [UUID: PermissionRequest] = [:]
 
     init(peers: PeerService) {
         self.peers = peers
@@ -96,6 +98,7 @@ final class ChatStore {
     func stopAll() {
         for handle in cliHandles.values { handle.interrupt() }
         for task in runningTasks.values { task.cancel() }
+        for id in Array(routingTokens.keys) { stop(id) }
     }
 
     var recentConversations: [Conversation] {
@@ -168,7 +171,8 @@ final class ChatStore {
         if text.isEmpty {
             if attachments.isEmpty { return nil }
             let images = attachments.filter(\.isImage).count
-            text = images == 0 ? "Take a look at the attached file\(attachments.count == 1 ? "" : "s")."
+            let noun = attachments.allSatisfy { $0.link != nil } ? "link" : attachments.allSatisfy { $0.isPastedText == true } ? "pasted text" : "attached file"
+            text = images == 0 ? "Take a look at \(attachments.count == 1 ? "this \(noun)" : "these \(noun)s")."
                 : (attachments.count == 1 ? "What does this screenshot show?" : "What do these screenshots show?")
         }
         let question = text
@@ -195,6 +199,15 @@ final class ChatStore {
     }
 
     func stop(_ id: UUID) {
+        if routingTokens.removeValue(forKey: id) != nil {
+            mutate(id) { conversation in
+                conversation.isRouting = false
+                conversation.messages.append(Message(role: .assistant, author: "Auto", text: "Stopped."))
+            }
+            runningConversationIDs.remove(id)
+            onActivityChanged?()
+        }
+        retryApprovals[id] = nil
         cliHandles[id]?.interrupt()
         runningTasks[id]?.cancel()
     }
@@ -227,6 +240,8 @@ final class ChatStore {
     /// Returns true if a deep chat still needs a folder (the question waits and is answered once one is chosen).
     func askAuto(_ rawText: String, attachments: [Attachment], in id: UUID) async -> Bool {
         guard let text = appendQuestion(rawText, attachments: attachments, in: id) else { return false }
+        let token = UUID()
+        routingTokens[id] = token
         mutate(id) { $0.isRouting = true }
         runningConversationIDs.insert(id)
 
@@ -244,6 +259,8 @@ final class ChatStore {
         } catch {
             decision = RouteDecision(route: .quick, folder: nil, reason: "", fellBack: true)
         }
+        guard routingTokens[id] == token, conversation(id) != nil else { return false }
+        routingTokens[id] = nil
 
         var folder: URL?
         if decision.route == .code, let deep {
@@ -350,6 +367,7 @@ final class ChatStore {
             self.runningConversationIDs.remove(id)
             self.runningTasks[id] = nil
             self.cliHandles[id] = nil
+            self.retryApprovals[id] = nil
             if !self.visibleConversations().contains(id) { self.finishedUnseen.insert(id) }
             self.onActivityChanged?()
         }
@@ -376,8 +394,10 @@ final class ChatStore {
             var content = message.text
             // Files attached by reference: OpenAI can't open them, so small text files travel inline.
             for file in message.attachments where message.role == .user && !file.isImage {
-                if let text = Attachments.inlineText(file) {
-                    content += "\n\nAttached file \(file.name):\n```\n\(text)\n```"
+                if let link = file.link {
+                    content += "\n\nLink: \(link)"
+                } else if let text = Attachments.inlineText(file) {
+                    content += "\n\n\(file.isPastedText == true ? "Pasted text" : "Attached file \(file.name)"):\n```\n\(text)\n```"
                 } else {
                     content += "\n\n(Attached file \(file.name) could not be included. A coding agent can read it.)"
                 }
@@ -411,8 +431,13 @@ final class ChatStore {
     /// What the agent is actually asked: the question, plus the skills and files that go with it.
     private func cliPrompt(_ prompt: String, files: [Attachment], skills: [String], provider: ProviderKind) -> String {
         var text = prompt
-        if !files.isEmpty {
-            text += "\n\nAttached file(s), read them as needed:\n" + files.map { "- \($0.path)" }.joined(separator: "\n")
+        let links = files.compactMap(\.link)
+        let paths = files.filter { $0.link == nil }
+        if !links.isEmpty {
+            text += "\n\nLink(s):\n" + links.map { "- \($0)" }.joined(separator: "\n")
+        }
+        if !paths.isEmpty {
+            text += "\n\nAttached file(s), read them as needed:\n" + paths.map { "- \($0.path)\($0.isPastedText == true ? " (text the user pasted)" : "")" }.joined(separator: "\n")
         }
         if !skills.isEmpty, provider == .claudeCode {
             let names = skills.map { "`\($0)`" }.joined(separator: ", ")
@@ -450,6 +475,7 @@ final class ChatStore {
         terminal.run = TerminalRun(phase: .starting, startedAt: Date(), level: level)
         terminal.run.cliVersion = terminals[id]?.run.cliVersion
         terminal.changes = []
+        terminal.plan = []
         terminal.subagents = []
         terminals[id] = terminal
         var textBuffer = ""
@@ -512,6 +538,13 @@ final class ChatStore {
                 message.steps[i].failed = failed
             }
         case .permissionRequest(let request):
+            if request.live, let approved = retryApprovals[id], approved.tool == request.tool,
+               Self.sameInput(approved.input, request.input) {
+                retryApprovals[id] = nil
+                cliHandles[id]?.respond(requestID: request.id, allow: true, input: request.input)
+                terminals[id, default: TerminalState()].append(.info, "allowed approved retry: \(request.tool) \(request.summary.prefix(120))")
+                return
+            }
             // "Always allow in this chat" answers on the user's behalf.
             if request.live, conversation(id)?.alwaysAllowed.contains(request.rule) == true {
                 cliHandles[id]?.respond(requestID: request.id, allow: true, input: request.input)
@@ -582,6 +615,8 @@ final class ChatStore {
             terminals[id, default: TerminalState()].appendRaw(line)
         case .runInfo(let patch):
             terminals[id, default: TerminalState()].run.apply(patch)
+        case .plan(let plan):
+            terminals[id, default: TerminalState()].plan = plan
         }
     }
 
@@ -609,12 +644,18 @@ final class ChatStore {
         return nil
     }
 
+    private static func sameInput(_ a: Data, _ b: Data) -> Bool {
+        guard let left = (try? JSONSerialization.jsonObject(with: a)) as? NSDictionary,
+              let right = (try? JSONSerialization.jsonObject(with: b)) as? NSDictionary else { return false }
+        return left.isEqual(right)
+    }
+
     /// Allow what the agent asked for. `always` also allows the same kind of request for the rest of this chat.
     func allow(_ requestID: String, in id: UUID, always: Bool = false) {
         guard let (message, request) = locate(requestID, in: id), request.status == .pending else { return }
-        if always { mutate(id) { $0.alwaysAllowed.insert(request.rule) } }
         if request.live {
             guard let handle = cliHandles[id] else { return }
+            if always { mutate(id) { $0.alwaysAllowed.insert(request.rule) } }
             handle.respond(requestID: request.id, allow: true, input: request.input)
             mutateMessage(id, message.id) { message in
                 if let i = message.permissions.firstIndex(where: { $0.id == requestID }) { message.permissions[i].status = .allowed }
@@ -632,21 +673,19 @@ final class ChatStore {
         }
         // The call was refused during a read-only run: run again, this time able to ask or edit.
         guard let conversation = conversation(id), conversation.provider.isDeep, !isRunning(id) else { return }
-        let waiting = message.permissions.filter { $0.status == .pending && !$0.live }
+        if always { mutate(id) { $0.alwaysAllowed.insert(request.rule) } }
         mutateMessage(id, message.id) { message in
-            for i in message.permissions.indices where message.permissions[i].status == .pending && !message.permissions[i].live {
-                message.permissions[i].status = .allowed
-            }
+            if let i = message.permissions.firstIndex(where: { $0.id == requestID }) { message.permissions[i].status = .allowed }
         }
-        let edits = waiting.filter(\.isEdit)
-        let what = edits.isEmpty ? waiting.map { "\($0.tool) \($0.summary)" }.joined(separator: "; ")
-            : Set(edits.map { $0.fileName.isEmpty ? $0.summary : $0.fileName }).sorted().joined(separator: ", ")
-        let prompt = edits.isEmpty
-            ? "The user approved what was refused (\(what)). Do exactly that now, then confirm in one sentence."
-            : "The user approved your proposed edits (\(what)). Apply exactly those changes now, then confirm in one sentence."
-        mutate(id) { $0.messages.append(Message(role: .user, author: "You", text: edits.isEmpty ? "Allow: \(what)" : "Allow edits to \(what)")) }
-        // Claude asks again for anything beyond edits; Codex gets a writable sandbox for this run.
-        startAnswer(in: id, prompt: prompt, provider: conversation.provider, level: .acceptEdits)
+        let what = request.isEdit ? (request.fileName.isEmpty ? request.summary : request.fileName) : "\(request.tool) \(request.summary)"
+        let prompt = conversation.provider == .claudeCode
+            ? "The user approved only this refused request (\(what)). Do that now, then confirm in one sentence. Ask before any other changes."
+            : "The user allowed edits in this folder for this retry. Apply the proposed change (\(what)) and confirm in one sentence. Make no other changes."
+        mutate(id) { $0.messages.append(Message(role: .user, author: "You", text: "Allow: \(what)")) }
+        if conversation.provider == .claudeCode && !always { retryApprovals[id] = request }
+        // Claude prompts for other actions. Codex has no live prompt and uses a writable sandbox for this run.
+        startAnswer(in: id, prompt: prompt, provider: conversation.provider,
+                    level: conversation.provider == .claudeCode ? .ask : .acceptEdits)
     }
 
     func deny(_ requestID: String, in id: UUID, reason: String? = nil) {

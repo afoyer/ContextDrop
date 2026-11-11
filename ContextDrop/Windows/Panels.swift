@@ -142,6 +142,14 @@ final class QuickChatPanelController {
                                 select: { [weak model] id in model?.selectPanelTab(id) })
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let handled = MainActor.assumeIsolated { () -> Bool in
+                // ⌘V: a link or a long text becomes a chip instead of filling the input.
+                if let self, event.window === self.panel, event.charactersIgnoringModifiers?.lowercased() == "v",
+                   event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
+                    switch self.model.mode {
+                    case .home, .chat: return self.model.pasteKey(in: self.panel, session: self.model.session(self.model.panelConversationID))
+                    default: return false
+                    }
+                }
                 guard let self, event.window === self.panel, event.keyCode == 48,
                       event.modifierFlags.contains(.control), self.model.panelConversationID != nil else { return false }
                 self.model.cyclePanelTab(backwards: event.modifierFlags.contains(.shift))

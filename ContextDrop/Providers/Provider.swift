@@ -18,11 +18,12 @@ enum ProviderEvent: Sendable {
     case log(TerminalLine.Kind, String, agent: String? = nil) // activity pane only
     case raw(String)                  // the CLI's JSON line, for the Raw JSON view
     case runInfo(TerminalRunPatch)    // terminal pane status (pid, model, tokens, exit code…)
+    case plan([RunPlanStep])          // the agent's to-do list (replaces the previous one)
 
     /// Terminal-pane telemetry that doesn't count as an answer.
     var isTelemetry: Bool {
         switch self {
-        case .log, .runInfo, .raw: true
+        case .log, .runInfo, .raw, .plan: true
         default: false
         }
     }

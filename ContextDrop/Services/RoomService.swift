@@ -39,6 +39,8 @@ final class RoomService: NSObject {
     @ObservationIgnored var onInviteUnanswered: (@MainActor (MCPeerID) -> Void)?
     /// Guest only: accepted, but the host never connected.
     @ObservationIgnored var onJoinFailed: (@MainActor () -> Void)?
+    /// A file arrived (already moved to a temporary place we own). The name is "<tileID>|<fileID>".
+    @ObservationIgnored var onFile: (@MainActor (URL, String) -> Void)?
 
     @ObservationIgnored private let peers: PeerService
     @ObservationIgnored private var session: MCSession?
@@ -53,8 +55,6 @@ final class RoomService: NSObject {
             self.handleInvitation(invitation, from: peerID, reply: reply)
         }
     }
-
-    var isOpen: Bool { session != nil }
 
     func isHostPeer(_ peerID: MCPeerID) -> Bool {
         if case .guest(let host) = role { return host == peerID }
@@ -124,10 +124,6 @@ final class RoomService: NSObject {
         removePending(invitation.id)
     }
 
-    func declineAll() {
-        for invitation in pendingInvitations { decline(invitation) }
-    }
-
     private func removePending(_ id: UUID) {
         guard pendingInvitations.contains(where: { $0.id == id }) else { return }
         pendingInvitations.removeAll { $0.id == id }
@@ -174,6 +170,28 @@ final class RoomService: NSObject {
             try session.send(try RoomCodec.encode(message), toPeers: recipients, with: .reliable)
         } catch {
             p2pLog.error("Room send (\(message.kind.rawValue, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Sends a file's bytes toward `member` (a display name). A guest always sends to the host, who passes it on.
+    /// `done` is called with false when it could not be sent.
+    func sendFile(_ url: URL, name: String, toMember member: String, done: @escaping @MainActor @Sendable (Bool) -> Void) {
+        guard let session, let role else { done(false); return }
+        let target: MCPeerID?
+        switch role {
+        case .host: target = connectedPeers.first { $0.displayName == member }
+        case .guest(let host): target = host
+        }
+        guard let target, session.connectedPeers.contains(target) else { done(false); return }
+        session.sendResource(at: url, withName: name, toPeer: target, withCompletionHandler: Self.resourceSent(done))
+    }
+
+    /// MPC calls this on its own queue, so it must not be a main-actor closure: it only hops to the main actor.
+    nonisolated private static func resourceSent(_ done: @escaping @MainActor @Sendable (Bool) -> Void) -> @Sendable (Error?) -> Void {
+        { error in
+            let sent = error == nil
+            if let error { p2pLog.error("Room file send failed: \(error.localizedDescription, privacy: .public)") }
+            Task { @MainActor in done(sent) }
         }
     }
 
@@ -236,6 +254,17 @@ final class RoomService: NSObject {
             p2pLog.error("Room: ignored invalid message from \(peerID.displayName, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
+
+    fileprivate func handleFile(_ url: URL, name: String, from peerID: MCPeerID, session: MCSession) {
+        var accepted = session === self.session
+        // A guest only takes files from the host.
+        if case .guest(let host) = role, host != peerID { accepted = false }
+        guard accepted, let onFile else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        onFile(url, name)
+    }
 }
 
 // MARK: - Delegate (nonisolated → main actor)
@@ -255,5 +284,13 @@ extension RoomService: MCSessionDelegate {
 
     nonisolated func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {}
 
-    nonisolated func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {}
+    nonisolated func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {
+        // MPC deletes `localURL` when this returns, so move the file first.
+        guard error == nil, let localURL else { return }
+        let size = (try? localURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max
+        guard size <= RoomLimits.maxFileBytes else { return }
+        let kept = FileManager.default.temporaryDirectory.appendingPathComponent("ctxdrop-room-\(UUID().uuidString)")
+        guard (try? FileManager.default.moveItem(at: localURL, to: kept)) != nil else { return }
+        Task { @MainActor in self.handleFile(kept, name: resourceName, from: peerID, session: session) }
+    }
 }
