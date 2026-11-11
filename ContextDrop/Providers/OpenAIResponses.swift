@@ -26,6 +26,12 @@ enum OpenAIModelCaps {
         if id.hasPrefix("o1-mini") || id.hasPrefix("o1-preview") || id.hasPrefix("o3-mini") { return false }
         return true
     }
+
+    /// o-series and gpt-5 models reason before answering and reject some chat parameters.
+    static func reasons(_ model: String) -> Bool {
+        let id = model.lowercased()
+        return id.hasPrefix("gpt-5") || id.range(of: #"^o\d"#, options: .regularExpression) != nil
+    }
 }
 
 /// OpenAI Responses API (streamed answers with images and files) and the Files API.
@@ -48,13 +54,12 @@ struct OpenAIResponses: Sendable {
         var parts: [Part]
     }
 
-    let apiKey: String
+    let http: OpenAIHTTP
     let model: String
     var detail: OpenAIDetail = AppDefaults.openAIDetail
 
     static func fromSettings() throws -> OpenAIResponses {
-        guard let key = OpenAISettings.apiKey() else { throw ProviderError.missingKey }
-        return OpenAIResponses(apiKey: key, model: OpenAISettings.model)
+        OpenAIResponses(http: try .fromSettings(), model: OpenAISettings.model)
     }
 
     // MARK: Files
@@ -63,10 +68,7 @@ struct OpenAIResponses: Sendable {
     /// `purpose` is "vision" for images and "user_data" for everything else.
     func upload(_ data: Data, name: String, mimeType: String, purpose: String) async throws -> String {
         let boundary = "ctxdrop-\(UUID().uuidString)"
-        var request = URLRequest(url: Self.filesEndpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 180
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        var request = try http.request(Self.filesEndpoint, timeout: 180)
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         // Quotes and line breaks would break the part header.
@@ -77,11 +79,7 @@ struct OpenAIResponses: Sendable {
         body.append(data)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
 
-        let (reply, response) = try await URLSession.shared.upload(for: request, from: body)
-        guard let http = response as? HTTPURLResponse else { throw ProviderError.badResponse }
-        guard http.statusCode == 200 else {
-            throw ProviderError.http(http.statusCode, OpenAIClient.errorMessage(String(decoding: reply.prefix(4_000), as: UTF8.self)))
-        }
+        let reply = try await http.data(for: request, uploading: body)
         guard let object = try JSONSerialization.jsonObject(with: reply) as? [String: Any],
               let id = object["id"] as? String, !id.isEmpty else { throw ProviderError.badResponse }
         return id
@@ -89,10 +87,7 @@ struct OpenAIResponses: Sendable {
 
     /// Best effort: removes an uploaded file from the account.
     func delete(fileID: String) async {
-        var request = URLRequest(url: Self.filesEndpoint.appendingPathComponent(fileID))
-        request.httpMethod = "DELETE"
-        request.timeoutInterval = 20
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        guard let request = try? http.request(Self.filesEndpoint.appendingPathComponent(fileID), method: "DELETE", timeout: 20) else { return }
         _ = try? await URLSession.shared.data(for: request)
     }
 
@@ -116,62 +111,31 @@ struct OpenAIResponses: Sendable {
     }
 
     func stream(instructions: String, turns: [Turn]) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    var request = URLRequest(url: Self.responsesEndpoint)
-                    request.httpMethod = "POST"
-                    request.timeoutInterval = 180
-                    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    var body: [String: Any] = [
-                        "model": model,
-                        "stream": true,
-                        "store": false,
-                        "instructions": instructions,
-                        "input": turns.map(payload),
-                    ]
-                    if OpenAIClient.isReasoningModel(model) { body["reasoning"] = ["effort": "low"] }
-                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
-                    guard let http = response as? HTTPURLResponse else { throw ProviderError.badResponse }
-                    if http.statusCode != 200 {
-                        var text = ""
-                        for try await line in bytes.lines {
-                            text += line
-                            if text.count > 4_000 { break }
-                        }
-                        throw ProviderError.http(http.statusCode, OpenAIClient.errorMessage(text))
-                    }
-                    events: for try await line in bytes.lines {
-                        // SSE: "event: <type>" then "data: {...}"; the type is also inside the JSON.
-                        guard line.hasPrefix("data:") else { continue }
-                        let raw = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                        if raw == "[DONE]" { break }
-                        guard let data = raw.data(using: .utf8),
-                              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                              let type = object["type"] as? String else { continue }
-                        switch type {
-                        case "response.output_text.delta":
-                            if let delta = object["delta"] as? String, !delta.isEmpty { continuation.yield(delta) }
-                        case "response.completed", "response.incomplete":
-                            break events
-                        case "response.failed":
-                            let error = (object["response"] as? [String: Any])?["error"] as? [String: Any]
-                            throw ProviderError.http(0, (error?["message"] as? String) ?? "The request failed.")
-                        case "error":
-                            throw ProviderError.http(0, (object["message"] as? String) ?? "Stream error")
-                        default:
-                            break
-                        }
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+        http.textStream({
+            var body: [String: Any] = [
+                "model": model,
+                "stream": true,
+                "store": false,
+                "instructions": instructions,
+                "input": turns.map(payload),
+            ]
+            if OpenAIModelCaps.reasons(model) { body["reasoning"] = ["effort": "low"] }
+            return try http.request(Self.responsesEndpoint, timeout: 180, json: body)
+        }) { event in
+            switch event["type"] as? String {
+            case "response.output_text.delta":
+                if let delta = event["delta"] as? String, !delta.isEmpty { return .text(delta) }
+                return .skip
+            case "response.completed", "response.incomplete":
+                return .done
+            case "response.failed":
+                let error = (event["response"] as? [String: Any])?["error"] as? [String: Any]
+                throw ProviderError.http(0, (error?["message"] as? String) ?? "The request failed.")
+            case "error":
+                throw ProviderError.http(0, (event["message"] as? String) ?? "Stream error")
+            default:
+                return .skip
             }
-            continuation.onTermination = { _ in task.cancel() }
         }
     }
 }

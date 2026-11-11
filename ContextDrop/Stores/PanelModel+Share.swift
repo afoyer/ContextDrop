@@ -28,7 +28,7 @@ extension PanelModel {
             for (index, conversation) in chosen.enumerated() {
                 let item = SharePrep(conversation: conversation)
                 do {
-                    item.apply(try await OpenAIClient.fromSettings().summarize(conversation, detail: item.detail))
+                    item.apply(try await ShareSummarizer.summarize(conversation, detail: item.detail))
                 } catch {
                     if Task.isCancelled { return }
                     let reason = error.userMessage
@@ -84,7 +84,7 @@ extension PanelModel {
         summaryTask = Task { @MainActor in
             defer { if summaryToken == token { summaryTask = nil; summaryToken = nil } }
             do {
-                let draft = try await OpenAIClient.fromSettings().summarize(conversation, detail: detail)
+                let draft = try await ShareSummarizer.summarize(conversation, detail: detail)
                 guard !Task.isCancelled, summaryToken == token, self.prep === prep else { return }
                 withAnimation(Motion.streaming(reduceMotion)) { prep.apply(draft) }
             } catch {

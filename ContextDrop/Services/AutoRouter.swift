@@ -31,19 +31,10 @@ struct AutoRouter: Sendable {
         // Nothing to decide when no coding agent is ready.
         guard codeAvailable else { return RouteDecision(route: .quick, folder: nil, reason: "no coding agent ready") }
         do {
-            var request = URLRequest(url: Self.endpoint)
-            request.httpMethod = "POST"
-            request.timeoutInterval = 8
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(
-                withJSONObject: Self.body(question: question, shortcuts: shortcuts, defaultFolder: defaultFolder))
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else { throw ProviderError.badResponse }
-            guard http.statusCode == 200 else {
-                throw ProviderError.http(http.statusCode, OpenAIClient.errorMessage(String(decoding: data.prefix(4_000), as: UTF8.self)))
-            }
+            let http = OpenAIHTTP(apiKey: apiKey)
+            let request = try http.request(Self.endpoint, timeout: 8,
+                                           json: Self.body(question: question, shortcuts: shortcuts, defaultFolder: defaultFolder))
+            let data = try await http.data(for: request)
             return try Self.decision(from: data)
         } catch {
             return .fallback

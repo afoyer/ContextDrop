@@ -106,7 +106,7 @@ final class TextToolsTests: XCTestCase {
         let raw = """
         Here you go: {"title":"T","summary":"  Where it stands.  ","decisions":["  a ",""],"open_questions":["q1","q2","q3","q4","q5"],"keyFacts":["f"]}
         """
-        let draft = try OpenAIClient.parseDraft(raw)
+        let draft = try ShareSummarizer.parseDraft(raw)
         XCTAssertEqual(draft.summary, "Where it stands.")
         XCTAssertEqual(draft.decisions, ["a"])
         XCTAssertEqual(draft.openQuestions.count, 4)
@@ -114,14 +114,14 @@ final class TextToolsTests: XCTestCase {
     }
 
     func testSummaryDraftWithoutASummaryIsRefused() {
-        XCTAssertThrowsError(try OpenAIClient.parseDraft(#"{"title":"T","summary":""}"#))
-        XCTAssertThrowsError(try OpenAIClient.parseDraft("no json here"))
+        XCTAssertThrowsError(try ShareSummarizer.parseDraft(#"{"title":"T","summary":""}"#))
+        XCTAssertThrowsError(try ShareSummarizer.parseDraft("no json here"))
     }
 
     func testReasoningModels() {
-        XCTAssertTrue(OpenAIClient.isReasoningModel("gpt-5-mini"))
-        XCTAssertTrue(OpenAIClient.isReasoningModel("o3"))
-        XCTAssertFalse(OpenAIClient.isReasoningModel("gpt-4.1-mini"))
+        XCTAssertTrue(OpenAIModelCaps.reasons("gpt-5-mini"))
+        XCTAssertTrue(OpenAIModelCaps.reasons("o3"))
+        XCTAssertFalse(OpenAIModelCaps.reasons("gpt-4.1-mini"))
     }
 
     func testChatTitleIsTheFirstSixWords() {
