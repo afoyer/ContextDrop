@@ -19,7 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var launched = false
     private var notificationsAllowed: Bool?
 
+    /// The app is only hosting the unit tests: no menu bar, no discovery, no Keychain.
+    private static let isHostingTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !Self.isHostingTests else { return }
         launched = true
         setUpMenuBar()
         shortcuts.onChange = { [weak self] shortcut in self?.menuBar.shortcut = shortcut.display }
@@ -113,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        guard !Self.isHostingTests else { return }
         store.stopAll() // no agent keeps running (or editing) after the app is gone
         roomStore.leave()
         peers.shutdown()
