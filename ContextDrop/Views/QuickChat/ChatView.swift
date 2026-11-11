@@ -408,7 +408,8 @@ struct MessageBlock: View {
                 }
             }
         } else if let error = message.error {
-            ErrorCard(message: error, model: model, conversationID: conversation.id)
+            ErrorCard(message: error, failure: message.failure ?? (conversation.provider.isDeep ? .agentStopped : .noResponse),
+                      model: model, conversationID: conversation.id)
         } else {
             answer
         }
@@ -523,7 +524,7 @@ struct ThinkingRow: View {
             HStack(spacing: 10) {
                 Text("Thinking…").font(.system(size: 13)).foregroundStyle(.secondary)
                 Spacer()
-                Text(provider == .openAI ? "OpenAI · \(OpenAISettings.model)" : provider.displayName)
+                Text(provider.thinkingLabel)
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
         }
@@ -533,28 +534,23 @@ struct ThinkingRow: View {
 /// Board 1 · 04: the question is kept; one-key retry.
 struct ErrorCard: View {
     let message: String
+    let failure: ProviderFailure
     let model: PanelModel
     let conversationID: UUID
 
-    private var provider: ProviderKind? { model.store.conversation(conversationID)?.provider }
-    /// Settings can only help with the OpenAI key or a missing CLI.
-    private var settingsHelps: Bool {
-        provider == .openAI || message == ProviderError.missingKey.errorDescription || message.hasSuffix("isn’t installed on this Mac.")
-            || message.hasSuffix("isn't installed on this Mac.")
-    }
 
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle").foregroundStyle(.red).font(.system(size: 16))
             VStack(alignment: .leading, spacing: 2) {
-                Text(headline).font(.system(size: 13, weight: .semibold))
+                Text(failure.headline).font(.system(size: 13, weight: .semibold))
                 Text(message).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                 Text("Your question is still here.").font(.system(size: 12)).foregroundStyle(.secondary)
             }
             Spacer()
-            if settingsHelps { Button("Settings…") { model.onOpenSettings?() }.controlSize(.small) }
-            if message == ProviderError.noFolder.errorDescription {
+            if failure.settingsHelp { Button("Settings…") { model.onOpenSettings?() }.controlSize(.small) }
+            if failure == .noFolder {
                 Button("Choose Folder…") { model.onChooseFolder?(conversationID) }.controlSize(.small)
             }
             Button("Retry ↵") { model.store.retry(in: conversationID) }
@@ -564,13 +560,6 @@ struct ErrorCard: View {
         .padding(12)
         .background(Color.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .padding(.horizontal, -14)
-    }
-
-    private var headline: String {
-        for error in [ProviderError.missingKey, .noFolder, .badResponse] where error.errorDescription == message { return error.headline }
-        if message.hasSuffix("installed on this Mac.") { return ProviderError.notInstalled("").headline }
-        if message.contains("rejected the API key") { return ProviderError.missingKey.headline }
-        return provider == .openAI ? ProviderError.badResponse.headline : ProviderError.process("").headline
     }
 }
 

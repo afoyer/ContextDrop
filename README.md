@@ -48,14 +48,15 @@ Signing is ad-hoc ("Sign to Run Locally", `CODE_SIGN_IDENTITY = "-"`), so no App
 ## Architecture
 
 ```
-Views (SwiftUI) ──▶ PanelModel / WorkspaceModel ──▶ ChatStore ──▶ OpenAIClient · CLIRunner (claude / codex)
+Views (SwiftUI) ──▶ PanelModel / WorkspaceModel ──▶ ChatStore ──▶ ChatProvider ──▶ OpenAIProvider · CLIProvider (claude / codex)
                          │                             │
                          └── RoomStore ── RoomService ─┴── PeerService ──▶ Multipeer Connectivity
 ```
 
 - **Quick Chat** (`Windows/Panels.swift`, `Views/QuickChat`): the floating panel behind the global shortcut.
 - **Workspace window** (`Windows/WorkspaceWindow.swift`): one chat per tab. Quick Chat shows the same tabs. ⌘T new, ⌘1–9 jump (window), ⌃Tab next that needs you, ⌘W close, ⌘⇧T reopen, ⌥⌘A activity, two-finger swipe sideways.
-- **Coding agents** (`Providers/CLIRunner.swift`): runs `claude -p` or `codex exec` in the chat's folder and reads their JSON events. Claude Code's permission prompts and questions come back over stdin/stdout (`--permission-prompt-tool stdio`), so a run pauses on a card in the chat until you Allow, Deny or answer. Codex has no live prompt: it runs read-only, and a blocked edit becomes a card that re-runs it with write access.
+- **Providers** (`Providers/ChatProvider.swift`): every provider answers through one protocol and streams `ProviderEvent`s back; `ChatStore` knows nothing else about it. `ProviderKind` describes each one to the UI (see [Extending](#extending)).
+- **Coding agents** (`Providers/CLI/`): `CLIRunner` runs `claude -p` or `codex exec` in the chat's folder and reads their JSON events. Claude Code's permission prompts and questions come back over stdin/stdout (`--permission-prompt-tool stdio`), so a run pauses on a card in the chat until you Allow, Deny or answer. Codex has no live prompt: it runs read-only, and a blocked edit becomes a card that re-runs it with write access.
 - **Permission level** per chat: Read-only, Ask before editing (default) or Edits allowed. The default is in Settings › Providers.
 - **Changes**: every edit is shown as a diff in the chat and under Activity › Changes (`Services/LineDiff.swift`). For Codex the diff is `git diff` of the touched files against the last commit.
 - **Delegation** (Settings › Providers, off by default): Claude Code may hand read-only side tasks to Codex with `codex exec --sandbox read-only`. Codex may call `claude -p` only with Edits allowed, because its read-only sandbox blocks Claude's sign-in; that also turns on network access inside Codex's sandbox.
@@ -65,6 +66,28 @@ Views (SwiftUI) ──▶ PanelModel / WorkspaceModel ──▶ ChatStore ──
 - **Room** (`Services/RoomService.swift`, `Views/Room`): a shared canvas for people nearby. The Mac that opened it holds the state; it ends when that Mac leaves.
 
 The app is not sandboxed (it starts the `claude` and `codex` CLIs), and is ad-hoc signed.
+
+## Tests
+
+```sh
+xcodebuild test -project ContextDrop.xcodeproj -scheme ContextDrop -derivedDataPath build/DerivedData
+```
+
+The tests in `ContextDropTests/` cover the parts that have no UI: the Claude Code and Codex output parsers, `CLIRunner` end to end (with `/bin/sh` standing in for an agent, so no account is used), the provider registry, the room wire format, diffs and secret masking. The app is the test host, and it skips its normal startup when it is only hosting tests.
+
+## Extending
+
+**Add a coding-agent CLI.** Three steps, no changes to `ChatStore` or the views:
+
+1. Add a case to `ProviderKind` (`Providers/ProviderKind.swift`) and fill in its properties: name, `/token`s, whether it supports skills, what sharing it to a room makes, and so on. The compiler lists every `switch` that needs the new case, and they are all in that file.
+2. Write a `CLIAgent` and a `CLIParser` (`Providers/CLI/CLIAgent.swift` documents both). The agent says how to start the CLI (executable name, arguments, what goes on stdin, how to check sign-in); the parser turns each line the CLI prints into `ProviderEvent`s. `CodexAgent.swift` is the shorter example. `CLIRunner` handles the process, the PATH, stopping and exit codes.
+3. Add `CLIProvider(agent: YourAgent())` to `Providers.all` (`Providers/ChatProvider.swift`).
+
+**Add an API provider.** Same step 1, then write a `ChatProvider` directly (`OpenAIProvider.swift` is about 70 lines): `status()` says whether it can answer, `run(_:handle:)` returns a stream of `ProviderEvent`s. Yielding `.text` is enough for a plain chat.
+
+**What a provider can send back** is the `ProviderEvent` enum in `Providers/Provider.swift`: text, tool steps, permission requests, questions, subagents, file changes and activity-pane telemetry. The chat UI renders whichever of these arrive.
+
+Settings keys live in `Services/AppDefaults.swift`. One-line messages to the user go through `NoticeCenter`.
 
 ## Known limitations
 
@@ -81,8 +104,8 @@ Each chat is answered by one of three providers:
 | Provider | Runs | Used for |
 |---|---|---|
 | **OpenAI** (`Providers/OpenAIClient.swift`) | HTTPS to `api.openai.com/v1/chat/completions`, streamed over SSE | Quick answers with no file access and share summaries (Chat Completions); the Auto decision (Decisions API) |
-| **Claude Code** (`Providers/CLIRunner.swift`) | The local `claude` CLI, inside a project folder | Questions that need your files, repo or terminal |
-| **Codex** (`Providers/CLIRunner.swift`) | The local `codex` CLI, inside a project folder | Same as Claude Code |
+| **Claude Code** (`Providers/CLI/ClaudeCodeAgent.swift`) | The local `claude` CLI, inside a project folder | Questions that need your files, repo or terminal |
+| **Codex** (`Providers/CLI/CodexAgent.swift`) | The local `codex` CLI, inside a project folder | Same as Claude Code |
 
 ### OpenAI setup
 

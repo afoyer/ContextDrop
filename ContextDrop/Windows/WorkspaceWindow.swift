@@ -226,7 +226,7 @@ struct WorkspaceView: View {
                         .help(model.showTerminal ? "Hide activity (⌥⌘A)" : "Show activity (⌥⌘A)")
                         .accessibilityLabel(model.showTerminal ? "Hide activity" : "Show activity")
                 }
-                if model.roomActive, conversation.provider != .codex, !conversation.messages.isEmpty {
+                if model.roomActive, conversation.provider.roomShare != .none, !conversation.messages.isEmpty {
                     Button { model.onSendTabToRoom?(conversation) } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "square.grid.2x2")
@@ -234,7 +234,7 @@ struct WorkspaceView: View {
                         }
                     }
                     .controlSize(.small)
-                    .help(conversation.provider == .claudeCode
+                    .help(conversation.provider.roomShare == .liveRun
                           ? "Put this run in the room. Others can watch; only you approve edits or stop it."
                           : "Put this chat in the room. Anyone there can reply; it answers from your Mac.")
                 }

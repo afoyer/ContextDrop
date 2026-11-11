@@ -112,7 +112,7 @@ private struct ProviderSettingsTab: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Deep chats") {
-                ForEach([ProviderKind.claudeCode, .codex]) { kind in
+                ForEach(ProviderKind.deep) { kind in
                     LabeledContent(kind.displayName) {
                         Text(store.status(kind).detail).foregroundStyle(store.status(kind).isReady ? Color.primary : Color.secondary)
                     }
@@ -131,7 +131,7 @@ private struct ProviderSettingsTab: View {
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     Toggle("Let Claude Code and Codex hand side tasks to each other", isOn: $delegateAgents)
-                        .disabled(!(store.status(.claudeCode).isReady && store.status(.codex).isReady))
+                        .disabled(!ProviderKind.deep.allSatisfy { store.status($0).isReady })
                     Text("The agent you chat with can pass searches and reading to the other one, which spares its own usage (the other one’s usage goes up instead). The helper is read-only and shows as a lane in the chat. Claude Code can call Codex in any mode. Codex can call Claude Code only with “Edits allowed”, and then gets network access inside its sandbox.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

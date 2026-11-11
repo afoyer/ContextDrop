@@ -232,13 +232,13 @@ struct HomeView: View {
             case .folder(let selected): folder = selected
             case .auto: provider = nil; auto = true
             case .addFolder: return "Add a folder shortcut"
-            case .skill: provider = .claudeCode; auto = false
+            case .skill: provider = .forSkills; auto = false
             case .action(.share): return "Share a chat"
             case .action(.room): return "Open a room for people nearby"
             case .action(.folder): return "Choose a working folder"
             }
         }
-        if !model.homeSession.skills.isEmpty { provider = .claudeCode; auto = false }
+        if !model.homeSession.skills.isEmpty { provider = .forSkills; auto = false }
         if let provider {
             if provider.isDeep, let folder { return "Ask \(provider.displayName) in \(folder.display)" }
             return "Ask \(provider.displayName)"
@@ -484,11 +484,10 @@ struct ProviderMenu: View {
                 HairlineDivider().padding(.horizontal, 10).padding(.vertical, 4)
             }
             section("Quick answers")
-            row(.openAI)
+            ForEach(ProviderKind.allCases.filter { !$0.isDeep }) { row($0) }
             HairlineDivider().padding(.horizontal, 10).padding(.vertical, 4)
             section("Deep chats · runs on this Mac")
-            row(.claudeCode)
-            row(.codex)
+            ForEach(ProviderKind.deep) { row($0) }
             HairlineDivider().padding(.horizontal, 10).padding(.vertical, 4)
             Text("ContextDrop looks for each tool on your Mac and uses its own sign-in. It never stores those accounts.")
                 .font(.system(size: 11))
@@ -553,8 +552,8 @@ struct ProviderMenu: View {
                 Spacer()
                 if case .missingKey = status {
                     Button("Settings…") { model.onOpenSettings?() }.controlSize(.small)
-                } else if case .notFound = status {
-                    Link("How to install", destination: URL(string: kind == .claudeCode ? "https://docs.anthropic.com/en/docs/claude-code/setup" : "https://github.com/openai/codex")!)
+                } else if case .notFound = status, let url = kind.installURL {
+                    Link("How to install", destination: url)
                         .font(.system(size: 11))
                 } else if selected {
                     Image(systemName: "checkmark").font(.system(size: 11, weight: .bold))

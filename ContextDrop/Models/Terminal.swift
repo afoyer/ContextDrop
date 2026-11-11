@@ -12,7 +12,7 @@ struct TerminalLine: Identifiable, Hashable, Sendable {
     var agentID: String?
 }
 
-/// Partial update to a run's status, streamed from CLIRunner. Nil fields leave the current value alone.
+/// Partial update to a run's status, streamed from a provider. Nil fields leave the current value alone.
 struct TerminalRunPatch: Sendable {
     var pid: Int32?
     var model: String?

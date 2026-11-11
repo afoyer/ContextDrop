@@ -68,14 +68,38 @@ enum ProviderError: LocalizedError {
         }
     }
 
+    var failure: ProviderFailure {
+        switch self {
+        case .missingKey: .missingKey
+        case .http(401, _): .rejectedKey
+        case .http, .badResponse: .noResponse
+        case .notInstalled: .notInstalled
+        case .process: .agentStopped
+        case .noFolder: .noFolder
+        }
+    }
+}
+
+/// Why an answer failed, kept with the message so the error card can offer the right way out.
+enum ProviderFailure: String, Codable, Sendable {
+    case missingKey, rejectedKey, noResponse, notInstalled, agentStopped, noFolder
+
     /// Short headline for the error card.
     var headline: String {
         switch self {
-        case .missingKey: "Add your OpenAI key"
-        case .http, .badResponse: "OpenAI didn’t respond"
+        case .missingKey, .rejectedKey: "Add your OpenAI key"
+        case .noResponse: "OpenAI didn’t respond"
         case .notInstalled: "Tool not found"
-        case .process: "The agent stopped"
+        case .agentStopped: "The agent stopped"
         case .noFolder: "No folder chosen"
+        }
+    }
+
+    /// Settings can fix it (a key, or which tools are installed).
+    var settingsHelp: Bool {
+        switch self {
+        case .missingKey, .rejectedKey, .noResponse, .notInstalled: true
+        case .agentStopped, .noFolder: false
         }
     }
 }

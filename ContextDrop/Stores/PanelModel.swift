@@ -462,12 +462,13 @@ final class PanelModel {
             return
         }
         // Skills run in Claude Code.
-        if !skills.isEmpty && explicitProvider != .claudeCode {
-            guard store.status(.claudeCode).isUsable else {
-                notices.text = "Skills need Claude Code: \(store.status(.claudeCode).detail)"
+        if !skills.isEmpty && explicitProvider?.supportsSkills != true {
+            let provider = ProviderKind.forSkills
+            guard store.status(provider).isUsable else {
+                notices.text = "Skills need \(provider.displayName): \(store.status(provider).detail)"
                 return
             }
-            explicitProvider = .claudeCode
+            explicitProvider = provider
             autoRequested = false
         }
         if text.isEmpty && pendingAttachments.isEmpty && !parsed.commands.isEmpty {
@@ -642,8 +643,8 @@ final class PanelModel {
         if provider != conversation.provider { store.setProvider(provider, for: id) }
         if let folder { store.setFolder(folder, for: id) }
         input.draft = parsed.rest
-        if !input.skills.isEmpty, store.conversation(id)?.provider != .claudeCode {
-            notices.text = "Skills run in Claude Code. Switch this chat with /claude, or start a new one."
+        if !input.skills.isEmpty, store.conversation(id)?.provider.supportsSkills != true {
+            notices.text = "Skills run in \(ProviderKind.forSkills.displayName). Switch this chat with /\(ProviderKind.forSkills.slashTokens[0]), or start a new one."
             input.skills = []
         }
         if store.conversation(id)?.provider.isDeep == true, store.conversation(id)?.folder == nil {
@@ -752,7 +753,7 @@ final class PanelModel {
     /// ⌘⇧R: put the focused (or latest) answer in the room. For a Claude Code chat, the run itself goes in.
     func sendFocusedToRoom(in id: UUID) {
         guard roomActive, let conversation = store.conversation(id) else { return }
-        if conversation.provider == .claudeCode {
+        if conversation.provider.roomShare == .liveRun {
             onSendTabToRoom?(conversation)
             return
         }

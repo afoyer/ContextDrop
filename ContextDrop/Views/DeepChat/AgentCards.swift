@@ -44,7 +44,7 @@ struct PermissionCard: View {
                 }
                 Spacer()
                 if pending {
-                    if request.id != CLIRunner.LineParser.codexEditRequest.id {
+                    if !request.isFolderWide {
                         Menu {
                             Button("Always allow \(request.ruleLabel) in this chat") { store.allow(request.id, in: conversation.id, always: true) }
                         } label: { Text("Always…") }
@@ -73,7 +73,7 @@ struct PermissionCard: View {
 
     @ViewBuilder
     private var title: some View {
-        if request.id == CLIRunner.LineParser.codexEditRequest.id {
+        if request.isFolderWide {
             Text("\(conversation.provider.displayName) wants to edit files in this folder.").font(.system(size: 13))
         } else if request.isEdit {
             (Text(request.status == .pending ? "Allow an edit to " : "Edit to ")

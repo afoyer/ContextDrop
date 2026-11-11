@@ -1,30 +1,5 @@
 import Foundation
 
-enum ProviderKind: String, Codable, CaseIterable, Sendable, Identifiable {
-    case openAI = "openRouter", claudeCode, codex
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .openAI: "OpenAI"
-        case .claudeCode: "Claude Code"
-        case .codex: "Codex"
-        }
-    }
-
-    /// Deep providers run a local CLI agent inside a project folder.
-    var isDeep: Bool { self != .openAI }
-
-    var shortcutDigit: Character {
-        switch self {
-        case .openAI: "1"
-        case .claudeCode: "2"
-        case .codex: "3"
-        }
-    }
-}
-
 /// One visible step taken by a CLI agent (search, read, command, edit).
 struct ToolStep: Codable, Hashable, Identifiable, Sendable {
     enum Kind: String, Codable, Sendable { case search, read, command, edit, other }
@@ -100,6 +75,10 @@ struct PermissionRequest: Codable, Hashable, Identifiable, Sendable {
     static let editTools: Set<String> = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
 
     var isEdit: Bool { Self.editTools.contains(tool) }
+
+    /// "Allow edits in this folder": offered by an agent that can't ask about each edit (Codex's sandbox).
+    static let folderEdits = PermissionRequest(id: "codex-edits", tool: "Edit", summary: "files in this folder", live: false)
+    var isFolderWide: Bool { id == Self.folderEdits.id }
     var fileName: String { ((filePath ?? "") as NSString).lastPathComponent }
 
     /// Key used by "Always allow in this chat": the tool, or for shell commands the tool plus the program.
@@ -198,6 +177,8 @@ struct Message: Identifiable, Codable, Hashable, Sendable {
     var attachments: [Attachment] = []
     var isStreaming = false
     var error: String?
+    /// What kind of error it was, so the error card can offer the right way out.
+    var failure: ProviderFailure?
     var createdAt = Date()
 
     init(id: UUID = UUID(), role: Role, author: String, text: String, attachments: [Attachment] = [], isStreaming: Bool = false) {

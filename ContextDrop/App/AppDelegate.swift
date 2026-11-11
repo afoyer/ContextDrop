@@ -248,13 +248,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// chat tile everyone can reply in. Either way it keeps running on this Mac.
     private func sendTabToRoom(_ conversation: Conversation) {
         guard roomStore.isActive else { return }
-        if conversation.provider == .claudeCode {
+        switch conversation.provider.roomShare {
+        case .liveRun:
             guard roomStore.shareRun(conversation) != nil else { return }
             notices.text = "This run is in the room. Others can watch; only you approve edits or stop it. Secrets in the log are hidden."
-        } else if conversation.provider == .openAI {
+        case .chatCopy:
             guard roomStore.shareChat(conversation) != nil else { return }
             notices.text = "This chat is in the room as a copy. Anyone there can reply; it answers from your Mac."
-        } else {
+        case .none:
             notices.text = "Only Claude Code runs and OpenAI chats can go in a room for now."
             return
         }

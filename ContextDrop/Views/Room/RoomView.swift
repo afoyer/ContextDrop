@@ -230,8 +230,8 @@ struct RoomView: View {
         let mine = (store.chats?.conversations ?? [])
             .filter { !$0.messages.isEmpty }
             .sorted { $0.updatedAt > $1.updatedAt }
-        let runs = mine.filter { $0.provider == .claudeCode }.prefix(8)
-        let chats = mine.filter { $0.provider == .openAI }.prefix(8)
+        let runs = mine.filter { $0.provider.roomShare == .liveRun }.prefix(8)
+        let chats = mine.filter { $0.provider.roomShare == .chatCopy }.prefix(8)
         return Menu {
             Button("New Chat", systemImage: "bubble.left") {
                 if let id = store.addChatTile(title: "New chat") { show(id) }

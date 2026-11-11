@@ -33,7 +33,7 @@ struct TerminalPane: View {
             statusStrip
             if segment == .log {
                 filterRow
-                if conversation.provider == .codex && state.run.isActive && !raw { activityStatus }
+                if conversation.provider.needsActivityHeartbeat && state.run.isActive && !raw { activityStatus }
             }
             HairlineDivider()
             switch segment {

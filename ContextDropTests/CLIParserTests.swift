@@ -8,8 +8,8 @@ final class CLIParserTests: XCTestCase {
 
     // MARK: Claude Code
 
-    private func claude(_ level: PermissionLevel = .ask) -> CLIRunner.LineParser {
-        CLIRunner.LineParser(kind: .claudeCode, folder: folder, level: level)
+    private func claude(_ level: PermissionLevel = .ask) -> ClaudeCodeParser {
+        ClaudeCodeParser(folder: folder, level: level)
     }
 
     func testClaudeInitStartsTheTurnAndReportsTheSession() {
@@ -132,8 +132,8 @@ final class CLIParserTests: XCTestCase {
 
     // MARK: Codex
 
-    private func codex() -> CLIRunner.LineParser {
-        CLIRunner.LineParser(kind: .codex, folder: folder, level: .readOnly)
+    private func codex() -> CodexParser {
+        CodexParser(folder: folder)
     }
 
     func testCodexSessionIsReportedWhenTheTurnStarts() {
@@ -168,7 +168,7 @@ final class CLIParserTests: XCTestCase {
         XCTAssertEqual(parser.parse(line).permissions.map(\.id), ["codex-edits"])
         XCTAssertTrue(parser.parse(line).permissions.isEmpty, "the card is offered once per run")
         XCTAssertTrue(parser.reportedBlockedEdits)
-        XCTAssertTrue(parser.takeCodexChanges().isEmpty)
+        XCTAssertTrue(parser.takeChangedFiles().isEmpty)
     }
 
     func testCodexAppliedPatchIsQueuedForItsDiff() {
@@ -176,7 +176,7 @@ final class CLIParserTests: XCTestCase {
         let events = parser.parse(#"{"type":"item.completed","item":{"id":"f1","type":"file_change","status":"completed","changes":[{"path":"/Users/me/project/a.swift","kind":"add"}]}}"#)
         XCTAssertEqual(events.steps.first?.label, "Edited")
         XCTAssertEqual(events.steps.first?.detail, "a.swift")
-        let changed = parser.takeCodexChanges()
+        let changed = parser.takeChangedFiles()
         XCTAssertEqual(changed.map(\.path), ["/Users/me/project/a.swift"])
         XCTAssertEqual(changed.map(\.kind), ["add"])
     }
@@ -191,7 +191,7 @@ final class CLIParserTests: XCTestCase {
 
     func testClaudeArgumentsFollowThePermissionLevel() {
         func args(_ level: PermissionLevel, session: String? = nil) -> [String] {
-            CLIRunner.arguments(for: .init(kind: .claudeCode, folder: URL(fileURLWithPath: folder), prompt: "hi", sessionID: session, level: level))
+            ClaudeCodeAgent().arguments(for: .init(folder: URL(fileURLWithPath: folder), prompt: "hi", sessionID: session, level: level))
         }
         XCTAssertTrue(args(.readOnly).contains("dontAsk"))
         XCTAssertFalse(args(.readOnly).contains("--permission-prompt-tool"))
@@ -203,7 +203,7 @@ final class CLIParserTests: XCTestCase {
 
     func testCodexArgumentsFollowThePermissionLevel() {
         func args(_ level: PermissionLevel, session: String? = nil) -> [String] {
-            CLIRunner.arguments(for: .init(kind: .codex, folder: URL(fileURLWithPath: folder), prompt: "hi", sessionID: session, level: level))
+            CodexAgent().arguments(for: .init(folder: URL(fileURLWithPath: folder), prompt: "hi", sessionID: session, level: level))
         }
         XCTAssertEqual(args(.ask), ["exec", "--json", "-C", folder, "--skip-git-repo-check", "--sandbox", "read-only", "--", "hi"])
         XCTAssertTrue(args(.acceptEdits).contains("workspace-write"))

@@ -21,7 +21,7 @@ struct FolderShortcut: Codable, Hashable, Identifiable, Sendable {
 final class FolderShortcutStore {
     private static let key = "ContextDrop.folderShortcuts"
     /// Names that are slash commands themselves.
-    static let reserved: Set<String> = ["quick", "openai", "openrouter", "claude", "codex", "auto", "add", "share", "room", "folder"]
+    static let reserved = Set(ProviderKind.allCases.flatMap(\.slashTokens) + ["auto", "add", "share", "room", "folder"])
 
     private(set) var shortcuts: [FolderShortcut] = []
 
@@ -132,10 +132,8 @@ enum SlashCommand: Equatable {
 
     @MainActor
     static func command(for token: String, folders: FolderShortcutStore) -> SlashCommand? {
-        switch token {
-        case "quick", "openai", "openrouter": .provider(.openAI)
-        case "claude": .provider(.claudeCode)
-        case "codex": .provider(.codex)
+        if let provider = ProviderKind.allCases.first(where: { $0.slashTokens.contains(token) }) { return .provider(provider) }
+        return switch token {
         case "auto": .auto
         case "add": .addFolder
         case "share": .action(.share)
@@ -180,11 +178,11 @@ struct SlashItem: Identifiable, Equatable {
             commands.append(SlashItem(token: "folder", title: "/folder", subtitle: "Change the working folder", icon: "folder.badge.gearshape"))
         }
         commands.append(SlashItem(token: "room", title: "/room", subtitle: "Open a room for people nearby", icon: "square.grid.2x2"))
-        commands += [
-            SlashItem(token: "claude", title: "/claude", subtitle: "Ask Claude Code (reads a folder on this Mac)", icon: "terminal"),
-            SlashItem(token: "codex", title: "/codex", subtitle: "Ask Codex (reads a folder on this Mac)", icon: "terminal"),
-            SlashItem(token: "quick", title: "/quick", subtitle: "Quick answer from OpenAI", icon: "bubble.left"),
-        ]
+        commands += (ProviderKind.deep + ProviderKind.allCases.filter { !$0.isDeep }).compactMap { provider in
+            provider.slashTokens.first.map {
+                SlashItem(token: $0, title: "/\($0)", subtitle: provider.slashSubtitle, icon: provider.isDeep ? "terminal" : "bubble.left")
+            }
+        }
         if autoAvailable { commands.append(SlashItem(token: "auto", title: "/auto", subtitle: "Let OpenAI pick quick answer or Claude Code", icon: "sparkles")) }
         commands.append(SlashItem(token: "add", title: "/add", subtitle: "Add a folder shortcut…", icon: "folder.badge.plus"))
         // Skills are matched on description too; commands only by name.
