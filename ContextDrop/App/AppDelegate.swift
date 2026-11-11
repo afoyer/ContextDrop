@@ -4,7 +4,8 @@ import UserNotifications
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
-    let peers = PeerService()
+    let notices = NoticeCenter()
+    private(set) lazy var peers = PeerService(notices: notices)
     lazy var store = ChatStore(peers: peers)
     lazy var panelModel = PanelModel(store: store)
     lazy var roomStore = RoomStore(peers: peers)
@@ -240,7 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func sendToRoom(_ message: Message, from conversation: Conversation) {
         guard roomStore.isActive, !message.text.isEmpty else { return }
         guard roomStore.addCard(kind: .keptAnswer, text: message.text, caption: conversation.title) != nil else { return }
-        panelModel.peers.notice = "Added to the room. The rest of this chat stays private."
+        notices.text = "Added to the room. The rest of this chat stays private."
     }
 
     /// "To room" on a tab: a Claude Code chat becomes a live, watch-only run tile; an OpenAI chat becomes a
@@ -249,12 +250,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard roomStore.isActive else { return }
         if conversation.provider == .claudeCode {
             guard roomStore.shareRun(conversation) != nil else { return }
-            panelModel.peers.notice = "This run is in the room. Others can watch; only you approve edits or stop it. Secrets in the log are hidden."
+            notices.text = "This run is in the room. Others can watch; only you approve edits or stop it. Secrets in the log are hidden."
         } else if conversation.provider == .openAI {
             guard roomStore.shareChat(conversation) != nil else { return }
-            panelModel.peers.notice = "This chat is in the room as a copy. Anyone there can reply; it answers from your Mac."
+            notices.text = "This chat is in the room as a copy. Anyone there can reply; it answers from your Mac."
         } else {
-            panelModel.peers.notice = "Only Claude Code runs and OpenAI chats can go in a room for now."
+            notices.text = "Only Claude Code runs and OpenAI chats can go in a room for now."
             return
         }
         roomWindow.show()
@@ -320,45 +321,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             if let attachment {
                 panelModel.attach([attachment], to: session)
             } else if !CGPreflightScreenCaptureAccess() {
-                panelModel.peers.notice = "Screenshots need Screen Recording access: System Settings › Privacy & Security › Screen Recording › ContextDrop."
+                notices.text = "Screenshots need Screen Recording access: System Settings › Privacy & Security › Screen Recording › ContextDrop."
             }
             comeBack()
         }
     }
 
+    /// Runs an open panel in front, keeping the Quick Chat panel from closing itself meanwhile.
+    private func pick(_ panel: () -> [URL]) -> [URL] {
+        panelModel.isCapturing = true
+        defer { panelModel.isCapturing = false }
+        NSApp.activate(ignoringOtherApps: true)
+        return panel()
+    }
+
     private func pickImages() {
         let (session, comeBack) = leaveComposer()
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = true
-        panel.prompt = "Attach"
-        panel.message = "Choose images to show the AI, or files for a coding agent to read."
-        panelModel.isCapturing = true
-        NSApp.activate(ignoringOtherApps: true)
-        let response = panel.runModal()
-        panelModel.isCapturing = false
-        if response == .OK { panelModel.attachDropped(panel.urls, to: session) }
+        let files = pick { FilePicker.files(prompt: "Attach", message: "Choose images to show the AI, or files for a coding agent to read.") }
+        if !files.isEmpty { panelModel.attachDropped(files, to: session) }
         comeBack()
     }
 
     /// "/add": pick a folder, save it as a shortcut, and leave "/name " in the input ready to ask.
     private func addFolderShortcut() {
         let (session, comeBack) = leaveComposer()
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Add Shortcut"
-        panel.message = "Choose a project folder. You’ll reach it by typing /name."
-        panelModel.isCapturing = true
-        NSApp.activate(ignoringOtherApps: true)
-        let response = panel.runModal()
-        panelModel.isCapturing = false
-        if response == .OK, let url = panel.url {
+        let chosen = pick { FilePicker.folders(prompt: "Add Shortcut", message: "Choose a project folder. You’ll reach it by typing /name.") }
+        if let url = chosen.first {
             let shortcut = store.folders.add(url)
             session.draft = "/\(shortcut.name) " + session.draft
-            panelModel.peers.notice = "Saved /\(shortcut.name) → \(shortcut.display). Rename it in Settings."
+            notices.text = "Saved /\(shortcut.name) → \(shortcut.display). Rename it in Settings."
         }
         comeBack()
     }
@@ -367,19 +358,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func chooseFolder(for id: UUID) {
         let inWindow = workspace.isVisible && panelModel.workspace.selected == id && panelModel.panelConversationID != id
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Use Folder"
-        panel.message = "Choose the project folder the agent works in."
-        panelModel.isCapturing = true
-        NSApp.activate(ignoringOtherApps: true)
-        let response = panel.runModal()
-        panelModel.isCapturing = false
-        if response == .OK, let url = panel.url {
-            store.setFolder(url, for: id)
-        }
+        let chosen = pick { FilePicker.folders(prompt: "Use Folder", message: "Choose the project folder the agent works in.") }
+        if let url = chosen.first { store.setFolder(url, for: id) }
         if inWindow { workspace.show() } else { quickChat.show() }
     }
 }

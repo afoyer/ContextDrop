@@ -93,8 +93,7 @@ final class RoomRunBroadcaster {
         /// The first line only. Secrets are hidden once, for every field, in `masked()` below.
         func line(_ text: String) -> String { String(text.prefix(while: { !$0.isNewline })) }
         func relative(_ path: String) -> String {
-            if let root, path.hasPrefix(root + "/") { return String(path.dropFirst(root.count + 1)) }
-            return (path as NSString).abbreviatingWithTildeInPath
+            root.flatMap { FolderDrop.relative(path, to: $0) } ?? (path as NSString).abbreviatingWithTildeInPath
         }
 
         var run = RoomRunTile(ownerName: me,

@@ -294,13 +294,8 @@ struct RoomChatTileView: View {
 
     private func pickFiles() {
         guard canType else { return }
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.prompt = "Add"
-        panel.message = "Add files to “\(chat.title)”. They are sent to \(isMine ? "OpenAI with your key" : "\(chat.ownerName)’s Mac"), and everyone here can ask about them."
-        guard panel.runModal() == .OK else { return }
-        store.addFiles(panel.urls, to: tile.id)
+        let chosen = FilePicker.files(prompt: "Add", message: "Add files to “\(chat.title)”. They are sent to \(isMine ? "OpenAI with your key" : "\(chat.ownerName)’s Mac"), and everyone here can ask about them.")
+        store.addFiles(chosen, to: tile.id)
     }
 
     // MARK: Dropping files

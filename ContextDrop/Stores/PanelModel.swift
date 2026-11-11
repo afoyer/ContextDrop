@@ -91,8 +91,8 @@ final class PanelModel {
     /// True while the system screenshot UI is up (the panel is hidden meanwhile).
     var isCapturing = false
     /// Deep chats show the agent's terminal in a pane to the right of the chat (⌘T).
-    var showTerminal = UserDefaults.standard.object(forKey: "ContextDrop.showTerminal") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(showTerminal, forKey: "ContextDrop.showTerminal") }
+    var showTerminal = AppDefaults.showTerminal {
+        didSet { AppDefaults.showTerminal = showTerminal }
     }
 
     // Wired by the AppDelegate.
@@ -135,6 +135,7 @@ final class PanelModel {
     }
 
     var peers: PeerService { store.peers }
+    var notices: NoticeCenter { store.notices }
     var reduceMotion: Bool { store.reduceMotion }
 
     static let chatWidth: CGFloat = 640
@@ -307,7 +308,7 @@ final class PanelModel {
         let free = items.filter { !$0.countsTowardLimit }
         let limited = items.filter(\.countsTowardLimit)
         let room = Attachments.maxPerMessage - session.pendingAttachments.filter(\.countsTowardLimit).count
-        if !limited.isEmpty, room <= 0 { peers.notice = "Up to \(Attachments.maxPerMessage) images or files per message." }
+        if !limited.isEmpty, room <= 0 { notices.text = "Up to \(Attachments.maxPerMessage) images or files per message." }
         guard !free.isEmpty || room > 0 else { return }
         withAnimation(Motion.keep(reduceMotion)) { session.pendingAttachments += free + limited.prefix(max(room, 0)) }
         session.requestFocus()
@@ -356,7 +357,7 @@ final class PanelModel {
     /// Images are copied in; other files are attached by reference (a coding agent reads them itself).
     func attachDropped(_ urls: [URL], to target: ChatSession? = nil) {
         let items = urls.compactMap { url in Attachments.isImage(url) ? Attachments.importFile(url) : Attachments.reference(url) }
-        if items.isEmpty { peers.notice = "Couldn’t attach that." } else { attach(items, to: target) }
+        if items.isEmpty { notices.text = "Couldn’t attach that." } else { attach(items, to: target) }
     }
 
     /// What a drop does, for the three drop targets.
@@ -382,15 +383,15 @@ final class PanelModel {
                     openInWorkspace(id)
                 } else {
                     homeFolder = shortcut
-                    peers.notice = "Using /\(shortcut.name) → \(shortcut.display)."
+                    notices.text = "Using /\(shortcut.name) → \(shortcut.display)."
                 }
             } else if let id = conversationID {
                 // "Use as working folder".
                 if store.conversation(id)?.provider.isDeep == false, let deep = store.preferredDeepProvider() {
-                    store.switchProvider(deep, for: id)
+                    store.setProvider(deep, for: id)
                 }
                 store.setFolder(folder, for: id)
-                peers.notice = "Working folder: \(FolderDrop.display(folder))."
+                notices.text = "Working folder: \(FolderDrop.display(folder))."
             }
         }
         guard !files.isEmpty else { return }
@@ -433,7 +434,7 @@ final class PanelModel {
                 draft = text
                 switch action {
                 case .room: onOpenRoom?()
-                case .share, .folder: peers.notice = "Open a chat first, then use /\(action.rawValue)."
+                case .share, .folder: notices.text = "Open a chat first, then use /\(action.rawValue)."
                 }
                 return
             case .addFolder:
@@ -448,23 +449,22 @@ final class PanelModel {
                 explicitProvider = provider
                 autoRequested = false
             case .folder(let shortcut):
-                guard shortcut.exists else { peers.notice = "/\(shortcut.name) points to a folder that no longer exists (\(shortcut.display))."; return }
+                guard shortcut.exists else { notices.text = "/\(shortcut.name) points to a folder that no longer exists (\(shortcut.display))."; return }
                 folder = shortcut.url
             }
         }
-        if let explicitProvider, store.status(explicitProvider).isReady == false,
-           store.status(explicitProvider) != .checking {
-            peers.notice = "\(explicitProvider.displayName): \(store.status(explicitProvider).detail)"
+        if let explicitProvider, !store.status(explicitProvider).isUsable {
+            notices.text = "\(explicitProvider.displayName): \(store.status(explicitProvider).detail)"
             return
         }
         if autoRequested && !store.autoAvailable {
-            peers.notice = "Auto is unavailable until OpenAI is ready."
+            notices.text = "Auto is unavailable until OpenAI is ready."
             return
         }
         // Skills run in Claude Code.
         if !skills.isEmpty && explicitProvider != .claudeCode {
-            guard store.status(.claudeCode).isReady || store.status(.claudeCode) == .checking else {
-                peers.notice = "Skills need Claude Code: \(store.status(.claudeCode).detail)"
+            guard store.status(.claudeCode).isUsable else {
+                notices.text = "Skills need Claude Code: \(store.status(.claudeCode).detail)"
                 return
             }
             explicitProvider = .claudeCode
@@ -483,7 +483,7 @@ final class PanelModel {
             } else if folder != nil && !autoRequested && !store.autoActive {
                 guard let deep = (store.defaultProvider.isDeep ? store.defaultProvider : nil)
                     ?? store.preferredDeepProvider() else {
-                    peers.notice = "Folder shortcuts need Claude Code or Codex on this Mac."
+                    notices.text = "Folder shortcuts need Claude Code or Codex on this Mac."
                     return
                 }
                 selectProvider(deep, for: nil)
@@ -502,7 +502,7 @@ final class PanelModel {
         if folder != nil && explicitProvider == nil && !autoRequested && !store.autoActive {
             guard let deep = (!store.autoRoute && store.defaultProvider.isDeep ? store.defaultProvider : nil)
                 ?? store.preferredDeepProvider() else {
-                peers.notice = "Folder shortcuts need Claude Code or Codex on this Mac."
+                notices.text = "Folder shortcuts need Claude Code or Codex on this Mac."
                 return
             }
             explicitProvider = deep
@@ -624,26 +624,26 @@ final class PanelModel {
                 }
                 return false
             case .auto:
-                peers.notice = "Auto picks the assistant for new chats. This chat keeps \(provider.displayName)."
+                notices.text = "Auto picks the assistant for new chats. This chat keeps \(provider.displayName)."
             case .provider(let selected):
-                guard store.status(selected).isReady || store.status(selected) == .checking else {
-                    peers.notice = "\(selected.displayName): \(store.status(selected).detail)"; return false
+                guard store.status(selected).isUsable else {
+                    notices.text = "\(selected.displayName): \(store.status(selected).detail)"; return false
                 }
                 provider = selected
             case .folder(let shortcut):
-                guard shortcut.exists else { peers.notice = "/\(shortcut.name) points to a folder that no longer exists."; return false }
+                guard shortcut.exists else { notices.text = "/\(shortcut.name) points to a folder that no longer exists."; return false }
                 if !provider.isDeep {
-                    guard let deep = store.preferredDeepProvider() else { peers.notice = "Folder shortcuts need Claude Code or Codex on this Mac."; return false }
+                    guard let deep = store.preferredDeepProvider() else { notices.text = "Folder shortcuts need Claude Code or Codex on this Mac."; return false }
                     provider = deep
                 }
                 folder = shortcut.url
             }
         }
-        if provider != conversation.provider { store.switchProvider(provider, for: id) }
+        if provider != conversation.provider { store.setProvider(provider, for: id) }
         if let folder { store.setFolder(folder, for: id) }
         input.draft = parsed.rest
         if !input.skills.isEmpty, store.conversation(id)?.provider != .claudeCode {
-            peers.notice = "Skills run in Claude Code. Switch this chat with /claude, or start a new one."
+            notices.text = "Skills run in Claude Code. Switch this chat with /claude, or start a new one."
             input.skills = []
         }
         if store.conversation(id)?.provider.isDeep == true, store.conversation(id)?.folder == nil {
@@ -781,9 +781,9 @@ final class PanelModel {
 
     func selectProvider(_ provider: ProviderKind, for id: UUID?) {
         showProviderMenu = false
-        guard store.status(provider).isReady || store.status(provider) == .checking else { return }
+        guard store.status(provider).isUsable else { return }
         if let id {
-            store.setProvider(provider, for: id)
+            store.setProvider(provider, for: id, asDefault: true)
             if provider.isDeep, store.conversation(id)?.folder == nil { onChooseFolder?(id) }
         } else {
             store.defaultProvider = provider
@@ -833,7 +833,7 @@ final class PanelModel {
                     item.apply(try await OpenAIClient.fromSettings().summarize(conversation, detail: item.detail))
                 } catch {
                     if Task.isCancelled { return }
-                    let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    let reason = error.userMessage
                     multi.phase = .failed("Couldn’t summarize “\(conversation.title)”. \(reason)")
                     return
                 }
@@ -843,7 +843,7 @@ final class PanelModel {
             }
             guard let first = built.first else { return }
             if airDrop {
-                do { try ShareFile.airDrop(built.map(\.share)) } catch { peers.notice = "AirDrop isn’t available on this Mac." }
+                do { try ShareFile.airDrop(built.map(\.share)) } catch { notices.text = "AirDrop isn’t available on this Mac." }
                 multi.phase = .choosing
                 return
             }
@@ -867,7 +867,7 @@ final class PanelModel {
     func setShareDetail(_ detail: ShareDetail) {
         guard let prep, prep.detail != detail else { return }
         prep.detail = detail
-        ShareDetail.preferred = detail
+        AppDefaults.shareDetail = detail
         regenerateSummary()
     }
 
@@ -890,7 +890,7 @@ final class PanelModel {
                 withAnimation(Motion.streaming(reduceMotion)) { prep.apply(draft) }
             } catch {
                 guard !Task.isCancelled, summaryToken == token, self.prep === prep else { return }
-                prep.phase = .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                prep.phase = .failed(error.userMessage)
                 // Still allow a hand-written summary.
                 if prep.summary.isEmpty { prep.isEditingSummary = true }
             }

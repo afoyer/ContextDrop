@@ -15,6 +15,7 @@ struct ReceivedShare: Identifiable, Equatable {
 @Observable
 final class ChatStore {
     let peers: PeerService
+    var notices: NoticeCenter { peers.notices }
     let folders = FolderShortcutStore()
     /// Auto mode for new chats (see `askAuto`). Picking a provider by hand turns it off.
     var autoRoute = AppDefaults.autoRoute {
@@ -130,8 +131,10 @@ final class ChatStore {
         return conversation.id
     }
 
-    func setProvider(_ provider: ProviderKind, for id: UUID) {
-        defaultProvider = provider
+    /// Changes this chat's provider. `asDefault` also makes it the provider new chats start with
+    /// (picked from the menu); slash commands leave the default alone.
+    func setProvider(_ provider: ProviderKind, for id: UUID, asDefault: Bool = false) {
+        if asDefault { defaultProvider = provider }
         mutate(id) { conversation in
             guard conversation.provider != provider else { return }
             conversation.provider = provider
@@ -146,15 +149,6 @@ final class ChatStore {
         }
         AppDefaults.lastFolder = url
         answerPendingQuestion(id)
-    }
-
-    /// Changes this chat's provider without touching the default (used by slash commands).
-    func switchProvider(_ provider: ProviderKind, for id: UUID) {
-        mutate(id) { conversation in
-            guard conversation.provider != provider else { return }
-            conversation.provider = provider
-            conversation.cliSessionID = nil
-        }
     }
 
     func ask(_ rawText: String, attachments: [Attachment] = [], skills: [String] = [], in id: UUID) {
@@ -226,7 +220,7 @@ final class ChatStore {
     // MARK: Auto routing
 
     /// Auto needs OpenAI (it makes the decision call).
-    var autoAvailable: Bool { status(.openAI).isReady || status(.openAI) == .checking }
+    var autoAvailable: Bool { status(.openAI).isUsable }
     var autoActive: Bool { autoRoute && autoAvailable }
 
     /// The coding agent Auto (or a folder shortcut) uses: the default one if deep and ready, else Claude Code, else Codex.
@@ -339,17 +333,17 @@ final class ChatStore {
                 }
                 self.finishTerminalRun(id, phase: Task.isCancelled ? .stopped : .finished)
             } catch {
-                let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
+                let cancelled = error.isCancellation
                 self.finishTerminalRun(id, phase: cancelled ? .stopped : .failed)
                 if !cancelled, provider.isDeep {
-                    self.terminals[id, default: TerminalState()].append(.error, (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                    self.terminals[id, default: TerminalState()].append(.error, error.userMessage)
                 }
                 self.mutateMessage(id, answer.id) { message in
                     message.isStreaming = false
                     if cancelled {
                         if message.text.isEmpty { message.text = "Stopped." }
                     } else {
-                        message.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                        message.error = error.userMessage
                     }
                 }
             }
@@ -776,7 +770,7 @@ final class ChatStore {
     func ingestFile(_ url: URL) -> ShareSummary? {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= WireCodec.maxPayloadBytes,
               let share = try? ShareSummary.fromFile(data) else {
-            peers.notice = "That .contextdrop file couldn't be read."
+            notices.text = "That .contextdrop file couldn't be read."
             return nil
         }
         receive(share)

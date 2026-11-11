@@ -157,7 +157,7 @@ final class RoomChatEngine {
                 let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
                 return (try await client.upload(data, name: file.name, mimeType: mime, purpose: "user_data"), .ready)
             } catch {
-                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                let reason = error.userMessage
                 return (nil, .failed(String(reason.prefix(140))))
             }
         }
@@ -274,9 +274,9 @@ final class RoomChatEngine {
                 }
                 if answer.text.isEmpty { answer.text = "(No answer.)" }
             } catch {
-                let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
+                let cancelled = error.isCancellation
                 if cancelled, answer.text.isEmpty { return }
-                let reason = cancelled ? "Stopped." : ((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                let reason = cancelled ? "Stopped." : error.userMessage
                 answer.text = answer.text.isEmpty ? reason : answer.text + "\n\n" + reason
                 answer.failed = !cancelled
             }

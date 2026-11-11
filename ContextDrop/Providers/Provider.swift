@@ -37,6 +37,8 @@ enum ProviderStatus: Equatable, Sendable {
     case missingKey
 
     var isReady: Bool { if case .ready = self { true } else { false } }
+    /// Ready, or not known yet: worth trying rather than refusing up front.
+    var isUsable: Bool { isReady || self == .checking }
 
     var detail: String {
         switch self {
@@ -76,4 +78,12 @@ enum ProviderError: LocalizedError {
         case .noFolder: "No folder chosen"
         }
     }
+}
+
+extension Error {
+    /// What to show the user: the error's own description when it has one.
+    var userMessage: String { (self as? LocalizedError)?.errorDescription ?? localizedDescription }
+
+    /// The work was stopped on purpose (Stop, a closed tab), not a failure.
+    var isCancellation: Bool { self is CancellationError || (self as? URLError)?.code == .cancelled }
 }

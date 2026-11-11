@@ -37,9 +37,9 @@ struct ChatView: View {
                     HairlineDivider()
                 }
                 transcript(conversation)
-                if let notice = model.peers.notice {
+                if let notice = model.notices.text {
                     HairlineDivider()
-                    NoticeRow(text: notice) { model.peers.notice = nil }
+                    NoticeRow(text: notice) { model.notices.text = nil }
                 }
                 HairlineDivider()
                 composer(conversation)
@@ -671,7 +671,7 @@ struct FolderChip: View {
             if let folder = conversation.folder, folders.shortcut(for: folder) == nil {
                 Button("Save as Shortcut /\(FolderShortcutStore.slug(folder.lastPathComponent))") {
                     let shortcut = folders.add(folder)
-                    model.peers.notice = "Saved. Type /\(shortcut.name) to use \(shortcut.display)."
+                    model.notices.text = "Saved. Type /\(shortcut.name) to use \(shortcut.display)."
                 }
             }
         } label: {

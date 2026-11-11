@@ -1,10 +1,45 @@
 import Foundation
 
-/// UserDefaults keys for the "new chat" defaults chosen in Settings.
+/// Every setting the app keeps in UserDefaults: one key and one typed accessor each.
+/// (Types that persist their own data, such as folder shortcuts or the global shortcut, keep a private key.)
 enum AppDefaults {
+    static let permissionLevelKey = "ContextDrop.permissionLevel"
+    static let openAIModelKey = "ContextDrop.openAIModel"
+    private static let shareDetailKey = "ContextDrop.shareDetail"
+    private static let openAIDetailKey = "ContextDrop.openAIDetail"
+    private static let showTerminalKey = "ContextDrop.showTerminal"
+
+    /// The permission level new chats start with (Settings › Providers).
+    static var permissionLevel: PermissionLevel {
+        UserDefaults.standard.string(forKey: permissionLevelKey).flatMap(PermissionLevel.init(rawValue:)) ?? .ask
+    }
+
+    /// The OpenAI model as typed in Settings ("" = the built-in default).
+    static var openAIModel: String {
+        get { UserDefaults.standard.string(forKey: openAIModelKey)?.trimmingCharacters(in: .whitespaces) ?? "" }
+        set { UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespaces), forKey: openAIModelKey) }
+    }
+
+    /// Brief or Detailed share summaries.
+    static var shareDetail: ShareDetail {
+        get { UserDefaults.standard.string(forKey: shareDetailKey).flatMap(ShareDetail.init(rawValue:)) ?? .detailed }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: shareDetailKey) }
+    }
+
+    /// How closely OpenAI looks at images and PDF pages in room chats.
+    static var openAIDetail: OpenAIDetail {
+        get { UserDefaults.standard.string(forKey: openAIDetailKey).flatMap(OpenAIDetail.init(rawValue:)) ?? .auto }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: openAIDetailKey) }
+    }
+
+    /// Deep chats show the agent's terminal pane beside the chat.
+    static var showTerminal: Bool {
+        get { UserDefaults.standard.object(forKey: showTerminalKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: showTerminalKey) }
+    }
+
     static let providerKey = "ContextDrop.defaultProvider"
     static let folderKey = "ContextDrop.defaultFolder"
-    static let claudeModelKey = "ContextDrop.claudeModel"
     static let autoRouteKey = "ContextDrop.autoRoute"
     static let lastFolderKey = "ContextDrop.lastFolder"
 
@@ -32,11 +67,6 @@ enum AppDefaults {
         set { UserDefaults.standard.set(newValue?.path, forKey: lastFolderKey) }
     }
 
-    /// `claude --model` aliases. Empty = whatever the CLI is configured to use.
-    static let claudeModels: [(id: String, label: String)] = [
-        ("", "CLI default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"),
-    ]
-
     static var provider: ProviderKind {
         get { UserDefaults.standard.string(forKey: providerKey).flatMap(ProviderKind.init(rawValue:)) ?? .openAI }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: providerKey) }
@@ -50,11 +80,6 @@ enum AppDefaults {
             return URL(fileURLWithPath: path, isDirectory: true)
         }
         set { UserDefaults.standard.set(newValue?.path, forKey: folderKey) }
-    }
-
-    static var claudeModel: String {
-        get { UserDefaults.standard.string(forKey: claudeModelKey) ?? "" }
-        set { UserDefaults.standard.set(newValue, forKey: claudeModelKey) }
     }
 }
 
@@ -70,4 +95,9 @@ enum FolderDrop {
     }
 
     static func display(_ url: URL) -> String { (url.path as NSString).abbreviatingWithTildeInPath }
+
+    /// `path` without the leading `folder/`, or nil when it isn't inside that folder.
+    static func relative(_ path: String, to folder: String) -> String? {
+        path.hasPrefix(folder + "/") ? String(path.dropFirst(folder.count + 1)) : nil
+    }
 }

@@ -44,7 +44,7 @@ struct PermissionCard: View {
                 }
                 Spacer()
                 if pending {
-                    if request.id != LineParserIDs.codexEdits {
+                    if request.id != CLIRunner.LineParser.codexEditRequest.id {
                         Menu {
                             Button("Always allow \(request.ruleLabel) in this chat") { store.allow(request.id, in: conversation.id, always: true) }
                         } label: { Text("Always…") }
@@ -73,7 +73,7 @@ struct PermissionCard: View {
 
     @ViewBuilder
     private var title: some View {
-        if request.id == LineParserIDs.codexEdits {
+        if request.id == CLIRunner.LineParser.codexEditRequest.id {
             Text("\(conversation.provider.displayName) wants to edit files in this folder.").font(.system(size: 13))
         } else if request.isEdit {
             (Text(request.status == .pending ? "Allow an edit to " : "Edit to ")
@@ -107,11 +107,6 @@ struct PermissionCard: View {
         }
         return Label(text, systemImage: icon).font(.system(size: 12)).foregroundStyle(color)
     }
-}
-
-/// Ids shared with CLIRunner's parser.
-enum LineParserIDs {
-    static let codexEdits = "codex-edits"
 }
 
 // MARK: - Decision
@@ -363,8 +358,7 @@ struct ChangesCard: View {
     }
 
     private func display(_ path: String) -> String {
-        if let folder, path.hasPrefix(folder.path + "/") { return String(path.dropFirst(folder.path.count + 1)) }
-        return (path as NSString).abbreviatingWithTildeInPath
+        folder.flatMap { FolderDrop.relative(path, to: $0.path) } ?? (path as NSString).abbreviatingWithTildeInPath
     }
 
     private func icon(_ kind: FileChange.Kind) -> String {

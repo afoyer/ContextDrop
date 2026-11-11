@@ -37,7 +37,6 @@ enum Keychain {
 
 enum OpenAISettings {
     static let keyAccount = "openai-api-key"
-    static let modelDefaultsKey = "ContextDrop.openAIModel"
     static let defaultModel = "gpt-4.1-mini"
 
     /// In-memory copy of the Keychain item. Keychain reads can block on a system approval prompt
@@ -100,7 +99,7 @@ enum OpenAISettings {
     }
 
     static var model: String {
-        let stored = UserDefaults.standard.string(forKey: modelDefaultsKey)?.trimmingCharacters(in: .whitespaces) ?? ""
+        let stored = AppDefaults.openAIModel
         return stored.isEmpty ? defaultModel : stored
     }
 }

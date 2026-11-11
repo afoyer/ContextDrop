@@ -54,7 +54,8 @@ final class PeerService: NSObject {
     private(set) var offers: [IncomingOffer] = []
     private(set) var outgoing: OutgoingTransfer?
     private(set) var isDiscovering = false
-    var notice: String?
+    /// Where problems the user should know about are posted.
+    @ObservationIgnored let notices: NoticeCenter
 
     /// Called when a full share arrived and was acknowledged. `open` = the user chose Continue.
     /// One share, or several tabs shared together (first is the one the offer previewed).
@@ -83,7 +84,8 @@ final class PeerService: NSObject {
     @ObservationIgnored private var transfers: [ObjectIdentifier: Transfer] = [:]
     @ObservationIgnored private var invitationReplies: [UUID: InvitationReply] = [:]
 
-    override init() {
+    init(notices: NoticeCenter) {
+        self.notices = notices
         let name = LocalIdentity.displayName()
         let peerID = LocalIdentity.peerID(for: name)
         localDisplayName = name
@@ -206,7 +208,7 @@ final class PeerService: NSObject {
             self.transfers[key] = nil
             transfer.session.disconnect()
             if let i = self.offers.firstIndex(where: { $0.id == offer.id }) { self.offers[i].phase = .failed }
-            self.notice = "\(offer.senderName)’s chat didn’t arrive. Make sure you’re both on the same Wi-Fi (or Bluetooth is on) and ask them to send it again."
+            self.notices.text = "\(offer.senderName)’s chat didn’t arrive. Make sure you’re both on the same Wi-Fi (or Bluetooth is on) and ask them to send it again."
         }
     }
 
@@ -295,7 +297,7 @@ final class PeerService: NSObject {
             case .receiving(let offerID, _):
                 transfers[key] = nil
                 if let i = offers.firstIndex(where: { $0.id == offerID }) { offers[i].phase = .failed }
-                notice = "Couldn't receive the chat from \(transfer.peerID.displayName). Ask them to send it again."
+                notices.text = "Couldn't receive the chat from \(transfer.peerID.displayName). Ask them to send it again."
             }
         case .connecting:
             break
@@ -329,20 +331,17 @@ final class PeerService: NSObject {
             }
         } catch {
             p2pLog.error("Ignored invalid payload from \(transfer.peerID.displayName, privacy: .public): \(String(describing: error), privacy: .public)")
-            notice = "Ignored an unreadable message from \(transfer.peerID.displayName)."
+            notices.text = "Ignored an unreadable message from \(transfer.peerID.displayName)."
         }
     }
 
     fileprivate func handleStartFailure(_ what: String, _ error: Error) {
         isDiscovering = false
         p2pLog.error("\(what, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-        notice = "Couldn't start \(what). Check System Settings › Privacy & Security › Local Network."
+        notices.text = "Couldn't start \(what). Check System Settings › Privacy & Security › Local Network."
     }
 
     // MARK: Rooms (used by RoomService)
-
-    /// The local peer, for sessions owned outside this class.
-    var localPeerID: MCPeerID { myPeerID }
 
     /// A session for the local peer with no delegate set; the caller owns it and its callbacks.
     func makeUnownedSession() -> MCSession {

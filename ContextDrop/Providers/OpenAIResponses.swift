@@ -12,12 +12,6 @@ enum OpenAIDetail: String, CaseIterable, Sendable, Identifiable {
         case .high: "High (reads small text)"
         }
     }
-
-    private static let key = "ContextDrop.openAIDetail"
-    static var preferred: OpenAIDetail {
-        get { UserDefaults.standard.string(forKey: key).flatMap(OpenAIDetail.init(rawValue:)) ?? .auto }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
-    }
 }
 
 /// What a model can be given besides text.
@@ -56,7 +50,7 @@ struct OpenAIResponses: Sendable {
 
     let apiKey: String
     let model: String
-    var detail: OpenAIDetail = .preferred
+    var detail: OpenAIDetail = AppDefaults.openAIDetail
 
     static func fromSettings() throws -> OpenAIResponses {
         guard let key = OpenAISettings.apiKey() else { throw ProviderError.missingKey }

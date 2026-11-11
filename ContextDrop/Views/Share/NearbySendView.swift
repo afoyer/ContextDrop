@@ -223,12 +223,12 @@ struct NearbySendView: View {
     }
 
     private func airDrop() {
-        do { try ShareFile.airDrop(share) } catch { model.peers.notice = "AirDrop isn’t available on this Mac." }
+        do { try ShareFile.airDrop(share) } catch { model.notices.text = "AirDrop isn’t available on this Mac." }
     }
 
     private func sharePicker() {
         guard let view = airDropAnchor.view else { return }
-        do { try ShareFile.showPicker(share, relativeTo: view) } catch { model.peers.notice = "Couldn’t prepare the share file." }
+        do { try ShareFile.showPicker(share, relativeTo: view) } catch { model.notices.text = "Couldn’t prepare the share file." }
     }
 
     private func handleKey(_ press: KeyPress) -> KeyPress.Result {

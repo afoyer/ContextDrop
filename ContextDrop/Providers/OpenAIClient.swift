@@ -34,12 +34,6 @@ enum ShareDetail: String, CaseIterable, Sendable {
     case brief, detailed
 
     var label: String { self == .brief ? "Brief" : "Detailed" }
-
-    private static let key = "ContextDrop.shareDetail"
-    static var preferred: ShareDetail {
-        get { UserDefaults.standard.string(forKey: key).flatMap(ShareDetail.init(rawValue:)) ?? .detailed }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
-    }
 }
 
 /// What OpenAI extracts for the share sheet.

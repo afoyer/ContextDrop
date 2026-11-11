@@ -387,7 +387,7 @@ enum CLIRunner {
         let result = await runCapture("/usr/bin/git", ["-C", folder.path, "diff", "--no-ext-diff", "--no-textconv", "--"] + paths, timeout: 8)
         let parsed = result.status == 0 ? LineDiff.parseUnified(result.output) : []
         return changed.map { item in
-            let relative = item.path.hasPrefix(folder.path + "/") ? String(item.path.dropFirst(folder.path.count + 1)) : item.path
+            let relative = FolderDrop.relative(item.path, to: folder.path) ?? item.path
             var change = FileChange(id: "codex-" + item.path, path: item.path,
                                     kind: item.kind == "add" ? .created : (item.kind == "delete" ? .deleted : .modified))
             if let match = parsed.first(where: { $0.path == relative || item.path.hasSuffix("/" + $0.path) }) {
@@ -477,7 +477,7 @@ enum CLIRunner {
         }
 
         private func relative(_ path: String) -> String {
-            path.hasPrefix(folder + "/") ? String(path.dropFirst(folder.count + 1)) : path
+            FolderDrop.relative(path, to: folder) ?? path
         }
 
         private mutating func text(_ value: String) -> [ProviderEvent] {
@@ -735,7 +735,7 @@ enum CLIRunner {
             case "Bash":
                 let command = input["command"] as? String ?? ""
                 return ToolStep(id: id, kind: .command, label: "Ran", detail: String(command.prefix(120)), done: false)
-            case "Edit", "Write", "MultiEdit", "NotebookEdit":
+            case _ where PermissionRequest.editTools.contains(name):
                 return ToolStep(id: id, kind: .edit, label: "Edit", detail: relative(path ?? ""), done: false, filePath: path)
             case "LS":
                 return ToolStep(id: id, kind: .read, label: "Listed", detail: relative(input["path"] as? String ?? "."), done: false)

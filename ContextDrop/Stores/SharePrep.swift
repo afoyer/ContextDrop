@@ -28,7 +28,7 @@ final class SharePrep {
     var summary = ""
     var isEditingSummary = false
     var kept: [KeptItem]
-    var detail = ShareDetail.preferred
+    var detail = AppDefaults.shareDetail
     var facts: [Toggled<String>] = []
     var decisions: [Toggled<String>] = []
     var nextSteps: [Toggled<String>] = []

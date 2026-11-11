@@ -74,11 +74,11 @@ private struct GeneralSettingsTab: View {
 private struct ProviderSettingsTab: View {
     let store: ChatStore
     @State private var apiKey = ""
-    @State private var model = UserDefaults.standard.string(forKey: OpenAISettings.modelDefaultsKey) ?? ""
+    @State private var model = AppDefaults.openAIModel
     @State private var keyMessage: String?
-    @AppStorage("ContextDrop.permissionLevel") private var permissionLevel = "ask"
+    @AppStorage(AppDefaults.permissionLevelKey) private var permissionLevel = PermissionLevel.ask.rawValue
     @AppStorage(AppDefaults.delegateKey) private var delegateAgents = false
-    @State private var detail = OpenAIDetail.preferred
+    @State private var detail = AppDefaults.openAIDetail
 
     var body: some View {
         Form {
@@ -107,7 +107,7 @@ private struct ProviderSettingsTab: View {
                 Picker("Images and PDFs in room chats", selection: $detail) {
                     ForEach(OpenAIDetail.allCases) { Text($0.label).tag($0) }
                 }
-                .onChange(of: detail) { OpenAIDetail.preferred = detail }
+                .onChange(of: detail) { AppDefaults.openAIDetail = detail }
                 Text("How closely the model looks at images and PDF pages. High reads small text but uses more tokens.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -156,7 +156,7 @@ private struct ProviderSettingsTab: View {
     }
 
     private func saveModel() {
-        UserDefaults.standard.set(model.trimmingCharacters(in: .whitespaces), forKey: OpenAISettings.modelDefaultsKey)
+        AppDefaults.openAIModel = model
     }
 }
 
@@ -239,15 +239,10 @@ struct FolderShortcutsSection: View {
     }
 
     private func addFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = true
-        panel.prompt = "Add"
-        if panel.runModal() == .OK {
-            let added = panel.urls.map { folders.add($0) }
-            message = "Added " + added.map { "/\($0.name)" }.joined(separator: ", ") + "."
-        }
+        let chosen = FilePicker.folders(prompt: "Add", multiple: true)
+        guard !chosen.isEmpty else { return }
+        let added = chosen.map { folders.add($0) }
+        message = "Added " + added.map { "/\($0.name)" }.joined(separator: ", ") + "."
     }
 }
 

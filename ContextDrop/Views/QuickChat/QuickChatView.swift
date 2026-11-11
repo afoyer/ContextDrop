@@ -197,9 +197,9 @@ struct HomeView: View {
                 .frame(height: 38)
             }
 
-            if let notice = model.peers.notice {
+            if let notice = model.notices.text {
                 HairlineDivider()
-                NoticeRow(text: notice) { model.peers.notice = nil }
+                NoticeRow(text: notice) { model.notices.text = nil }
             }
 
             HairlineDivider()

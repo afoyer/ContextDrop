@@ -45,13 +45,7 @@ struct ToolStep: Codable, Hashable, Identifiable, Sendable {
 enum PermissionLevel: String, Codable, CaseIterable, Sendable, Identifiable {
     case readOnly, ask, acceptEdits
 
-    static let defaultsKey = "ContextDrop.permissionLevel"
     var id: String { rawValue }
-
-    /// The level new chats start with (Settings › Providers).
-    static var preferred: PermissionLevel {
-        UserDefaults.standard.string(forKey: defaultsKey).flatMap(PermissionLevel.init(rawValue:)) ?? .ask
-    }
 
     var label: String {
         switch self {
@@ -102,7 +96,10 @@ struct PermissionRequest: Codable, Hashable, Identifiable, Sendable {
     var status: Status = .pending
     var createdAt = Date()
 
-    var isEdit: Bool { ["Edit", "Write", "MultiEdit", "NotebookEdit"].contains(tool) }
+    /// Claude Code's tools that change a file.
+    static let editTools: Set<String> = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+
+    var isEdit: Bool { Self.editTools.contains(tool) }
     var fileName: String { ((filePath ?? "") as NSString).lastPathComponent }
 
     /// Key used by "Always allow in this chat": the tool, or for shell commands the tool plus the program.
@@ -226,7 +223,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var sharedWith: [String] = []
     var cliSessionID: String?
     /// How much the coding agent may do without asking.
-    var permissionLevel: PermissionLevel = .preferred
+    var permissionLevel: PermissionLevel = AppDefaults.permissionLevel
     /// Tools the user chose to always allow in this chat (see `PermissionRequest.rule`).
     var alwaysAllowed: Set<String> = []
     /// Skills used with every message in this chat.
