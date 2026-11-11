@@ -53,8 +53,18 @@ Views (SwiftUI) ──▶ PanelModel / WorkspaceModel ──▶ ChatStore ──
                          └── RoomStore ── RoomService ─┴── PeerService ──▶ Multipeer Connectivity
 ```
 
+The stores hold state and talk to the network and to processes. The rules they follow are pure functions in their own files, each with tests:
+
+| Rule | File | Called by |
+|---|---|---|
+| What a provider event does to a chat and its activity pane | `Stores/ConversationReducer.swift` | `ChatStore` |
+| What a room message does to the table, and who may send it | `Stores/RoomReducer.swift` | `RoomStore` |
+| What a chain of `/commands` asks for | `Models/SlashRequest.swift` | `PanelModel+Slash.swift` |
+| How a room message looks as JSON | `RoomWire` in `Models/Room.swift` | `RoomCodec` |
+
 - **Quick Chat** (`Windows/Panels.swift`, `Views/QuickChat`): the floating panel behind the global shortcut.
 - **Workspace window** (`Windows/WorkspaceWindow.swift`): one chat per tab. Quick Chat shows the same tabs. ⌘T new, ⌘1–9 jump (window), ⌃Tab next that needs you, ⌘W close, ⌘⇧T reopen, ⌥⌘A activity, two-finger swipe sideways.
+- **Panel** (`Stores/PanelModel.swift` and its `PanelModel+Attachments`, `+Slash`, `+Share` files): what Quick Chat shows and its keyboard logic. What it needs from the rest of the app is one `PanelActions` struct, filled in by `AppDelegate`.
 - **Providers** (`Providers/ChatProvider.swift`): every provider answers through one protocol and streams `ProviderEvent`s back; `ChatStore` knows nothing else about it. `ProviderKind` describes each one to the UI (see [Extending](#extending)).
 - **Coding agents** (`Providers/CLI/`): `CLIRunner` runs `claude -p` or `codex exec` in the chat's folder and reads their JSON events. Claude Code's permission prompts and questions come back over stdin/stdout (`--permission-prompt-tool stdio`), so a run pauses on a card in the chat until you Allow, Deny or answer. Codex has no live prompt: it runs read-only, and a blocked edit becomes a card that re-runs it with write access.
 - **Permission level** per chat: Read-only, Ask before editing (default) or Edits allowed. The default is in Settings › Providers.
@@ -62,8 +72,9 @@ Views (SwiftUI) ──▶ PanelModel / WorkspaceModel ──▶ ChatStore ──
 - **Delegation** (Settings › Providers, off by default): Claude Code may hand read-only side tasks to Codex with `codex exec --sandbox read-only`. Codex may call `claude -p` only with Edits allowed, because its read-only sandbox blocks Claude's sign-in; that also turns on network access inside Codex's sandbox.
 - **Skills** (`Services/SkillCatalog.swift`): Claude Code skills from `~/.claude/skills`, the project and installed plugins appear in the `/` menu.
 - **Menu bar** (`Windows/MenuBarController.swift`): what needs you, what is running, what arrived. Drop a file on the icon to ask about it (⌥ for a new tab).
-- **Sharing** (`Services/PeerService.swift`, `Models/Wire.swift`): a share is a summary the sender curates, sent over an encrypted Multipeer session after the receiver accepts. Several tabs can go in one drop.
-- **Room** (`Services/RoomService.swift`, `Views/Room`): a shared canvas for people nearby. The Mac that opened it holds the state; it ends when that Mac leaves.
+- **Sharing** (`Services/PeerService.swift`, `Models/Wire.swift`): a share is a summary the sender curates, sent over an encrypted Multipeer session after the receiver accepts. Several tabs can go in one drop. `Services/ShareSummarizer.swift` writes the first draft; `SharePrep` holds the checklist and builds the share.
+- **Room** (`Services/RoomService.swift`, `Stores/RoomStore.swift`, `Views/Room`): a shared canvas for people nearby. The Mac that opened it holds the state, checks every change against `RoomReducer` and relays it; the room ends when that Mac leaves.
+- **OpenAI** (`Providers/OpenAIHTTP.swift`): one helper for authorized requests, errors and streamed replies, used by Chat Completions (`OpenAIClient`), Responses and Files (`OpenAIResponses`, room chats) and the Auto decision (`Services/AutoRouter.swift`).
 
 The app is not sandboxed (it starts the `claude` and `codex` CLIs), and is ad-hoc signed.
 
@@ -73,7 +84,7 @@ The app is not sandboxed (it starts the `claude` and `codex` CLIs), and is ad-ho
 xcodebuild test -project ContextDrop.xcodeproj -scheme ContextDrop -derivedDataPath build/DerivedData
 ```
 
-The tests in `ContextDropTests/` cover the parts that have no UI: the Claude Code and Codex output parsers, `CLIRunner` end to end (with `/bin/sh` standing in for an agent, so no account is used), the provider registry, the room wire format, diffs and secret masking. The app is the test host, and it skips its normal startup when it is only hosting tests.
+The tests in `ContextDropTests/` cover the parts that have no UI: the Claude Code and Codex output parsers, `CLIRunner` end to end (with `/bin/sh` standing in for an agent, so no account is used), the provider registry, the chat and room reducers, slash-command chains, the room wire format, the Auto decision's reply, diffs and secret masking. The app is the test host, and it skips its normal startup when it is only hosting tests.
 
 ## Extending
 
@@ -86,6 +97,25 @@ The tests in `ContextDropTests/` cover the parts that have no UI: the Claude Cod
 **Add an API provider.** Same step 1, then write a `ChatProvider` directly (`OpenAIProvider.swift` is about 70 lines): `status()` says whether it can answer, `run(_:handle:)` returns a stream of `ProviderEvent`s. Yielding `.text` is enough for a plain chat.
 
 **What a provider can send back** is the `ProviderEvent` enum in `Providers/Provider.swift`: text, tool steps, permission requests, questions, subagents, file changes and activity-pane telemetry. The chat UI renders whichever of these arrive.
+
+**Add a slash command.**
+
+1. Give it a case in `SlashCommand` (or in `SlashAction`, if it just does something and sends nothing) and map its token in `SlashCommand.command(for:)`, both in `Services/FolderShortcuts.swift`. Add the token to `FolderShortcutStore.reserved` so a folder shortcut can't take the name.
+2. List it in `SlashItem.matches` (same file) so it shows in the `/` menu.
+3. Say what it means in a chain in `SlashRequest.init(commands:rest:)`: a new field, or a `Stop` if nothing should be sent after it. Add a case to `SlashRequestTests`.
+4. Carry it out in `PanelModel+Slash.swift`: `submitFromHome` for the home input, `applySlash` for an open chat.
+
+A new provider needs none of this: its `/token`s come from `ProviderKind.slashTokens`.
+
+**Add a kind of room tile.**
+
+1. Add the body type and a case to `RoomTileContent` (`Models/Room.swift`), with a `sanitized()` that cuts everything a peer sends down to size. The compiler then points at the switches in `RoomTile` (`ownerName`, `shortLabel`, `contextText`).
+2. If people can change the tile after it is added, add a `RoomMessage` case for each change, its fields in `RoomWire` (`init` and `message()`, same file), and its rule in `RoomReducer.apply`: who may send it, and what is stamped from the sender's name rather than believed. Test the rule in `RoomReducerTests` and the round trip in `RoomCodecTests`.
+3. In `RoomReducer`'s `.addTile` case, stamp who owns the new tile.
+4. Draw it in `Views/Room/RoomCanvas.swift` (the tile switch is there), and decide what it contributes in `RoomTakeHomeSheet.swift` and as context for a room chat (`RoomChatEngine.swift`).
+5. If this Mac has to do work when a message arrives (as the owner of a chat or run does), do it in `RoomStore.afterApply`.
+
+New fields must be optional in `RoomWire`, and a change that older builds can't ignore needs a bump of `RoomMessage.currentVersion`: Macs on another version refuse the message.
 
 Settings keys live in `Services/AppDefaults.swift`. One-line messages to the user go through `NoticeCenter`.
 
@@ -103,7 +133,7 @@ Each chat is answered by one of three providers:
 
 | Provider | Runs | Used for |
 |---|---|---|
-| **OpenAI** (`Providers/OpenAIClient.swift`) | HTTPS to `api.openai.com/v1/chat/completions`, streamed over SSE | Quick answers with no file access and share summaries (Chat Completions); the Auto decision (Decisions API) |
+| **OpenAI** (`Providers/OpenAIProvider.swift`, `OpenAIClient.swift`) | HTTPS to `api.openai.com/v1/chat/completions`, streamed over SSE | Quick answers with no file access and share summaries (Chat Completions); the Auto decision (Decisions API) |
 | **Claude Code** (`Providers/CLI/ClaudeCodeAgent.swift`) | The local `claude` CLI, inside a project folder | Questions that need your files, repo or terminal |
 | **Codex** (`Providers/CLI/CodexAgent.swift`) | The local `codex` CLI, inside a project folder | Same as Claude Code |
 
@@ -117,7 +147,7 @@ The same key is used for the Decisions API.
 
 ### Auto mode (Decisions API)
 
-When Auto is on (**Settings › Auto mode**), the first question of a new chat is sent to the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`POST /v1/decisions`, model `gpt-6-luna`, 8 s timeout) by `OpenAIClient.route(...)`. The request asks up to two `choice` questions about the question text:
+When Auto is on (**Settings › Auto mode**), the first question of a new chat is sent to the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`POST /v1/decisions`, model `gpt-6-luna`, 8 s timeout) by `AutoRouter` (`Services/AutoRouter.swift`). The request asks up to two `choice` questions about the question text:
 
 - `route`: `quick` or `code`.
 - `folder` (only when folder shortcuts exist): one of the shortcut names, or `(none)`.
