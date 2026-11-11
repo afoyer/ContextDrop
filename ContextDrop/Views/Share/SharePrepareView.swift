@@ -218,7 +218,7 @@ struct SharePrepareView: View {
                 Button("Regenerate ⌘R") { model.regenerateSummary() }
                     .disabled(prep.phase == .summarizing)
                 if case .failed = prep.phase {
-                    Button("Settings…") { model.onOpenSettings?() }
+                    Button("Settings…") { model.actions.openSettings() }
                 }
             }
             .buttonStyle(.link)

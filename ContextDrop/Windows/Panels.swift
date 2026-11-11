@@ -135,7 +135,7 @@ final class QuickChatPanelController {
             if let key = NSApp.keyWindow, key.className.contains("Popover") { return }
             self.hide()
         }
-        model.onHide = { [weak self] in self?.hide() }
+        model.actions.hide = { [weak self] in self?.hide() }
         // Tabs in Quick Chat: swipe sideways anywhere on the panel, or ⌃Tab / ⌃⇧Tab.
         swipe = TabSwipeTracker(model: model, offset: \.panelSwipe, window: { [weak self] in self?.panel },
                                 current: { [weak model] in model?.panelConversationID },

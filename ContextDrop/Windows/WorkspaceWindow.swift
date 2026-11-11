@@ -227,7 +227,7 @@ struct WorkspaceView: View {
                         .accessibilityLabel(model.showTerminal ? "Hide activity" : "Show activity")
                 }
                 if model.roomActive, conversation.provider.roomShare != .none, !conversation.messages.isEmpty {
-                    Button { model.onSendTabToRoom?(conversation) } label: {
+                    Button { model.actions.sendTabToRoom(conversation) } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "square.grid.2x2")
                             Text("To room")
@@ -307,7 +307,7 @@ struct WorkspaceView: View {
         } else {
             model.beginShare(conversation.id)
         }
-        model.onShow?()
+        model.actions.show()
     }
 
     // MARK: Page

@@ -85,7 +85,7 @@ struct ChatView: View {
                     .accessibilityLabel("Share this chat")
                     .keyboardShortcut("s", modifiers: [.command, .shift])
                     .disabled(conversation.messages.isEmpty)
-                Button { model.onExpand?(conversation.id) } label: { Image(systemName: "macwindow") }
+                Button { model.actions.expand(conversation.id) } label: { Image(systemName: "macwindow") }
                     .buttonStyle(.borderless)
                     .help("Open in the window (⌘↵)")
                     .accessibilityLabel("Open in the window")
@@ -288,7 +288,7 @@ struct ChatView: View {
         switch press.key {
         case .return:
             if cmd {
-                if style == .panel { model.onExpand?(conversation.id) }
+                if style == .panel { model.actions.expand(conversation.id) }
                 return .handled
             }
             if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored } // newline
@@ -489,7 +489,7 @@ struct AnswerToolbar: View {
             .buttonStyle(.plain)
             .padding(.horizontal, 8).frame(height: 24)
             if model.roomActive, let conversation = model.store.conversation(conversationID) {
-                Button { model.onSendToRoom?(message, conversation) } label: {
+                Button { model.actions.sendToRoom(message, conversation) } label: {
                     HStack(spacing: 5) { Image(systemName: "square.grid.2x2"); Text("To room"); Kbd("⌘⇧R") }
                 }
                 .buttonStyle(.plain)
@@ -549,9 +549,9 @@ struct ErrorCard: View {
                 Text("Your question is still here.").font(.system(size: 12)).foregroundStyle(.secondary)
             }
             Spacer()
-            if failure.settingsHelp { Button("Settings…") { model.onOpenSettings?() }.controlSize(.small) }
+            if failure.settingsHelp { Button("Settings…") { model.actions.openSettings() }.controlSize(.small) }
             if failure == .noFolder {
-                Button("Choose Folder…") { model.onChooseFolder?(conversationID) }.controlSize(.small)
+                Button("Choose Folder…") { model.actions.chooseFolder(conversationID) }.controlSize(.small)
             }
             Button("Retry ↵") { model.store.retry(in: conversationID) }
                 .controlSize(.small)
@@ -624,10 +624,10 @@ struct ImageButtons: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Button { model.onCaptureScreenshot?() } label: { Image(systemName: "camera.viewfinder") }
+            Button { model.actions.captureScreenshot() } label: { Image(systemName: "camera.viewfinder") }
                 .help("Attach a screenshot: drag over an area, or press space for a window")
                 .accessibilityLabel("Attach a screenshot")
-            Button { model.onPickImages?() } label: { Image(systemName: "paperclip") }
+            Button { model.actions.pickImages() } label: { Image(systemName: "paperclip") }
                 .help("Attach images (or paste with ⌘V, or drop them here)")
                 .accessibilityLabel("Attach images")
         }
@@ -656,7 +656,7 @@ struct FolderChip: View {
                 .disabled(!shortcut.exists)
             }
             if !folders.shortcuts.isEmpty { Divider() }
-            Button("Choose Folder…") { model.onChooseFolder?(conversation.id) }
+            Button("Choose Folder…") { model.actions.chooseFolder(conversation.id) }
             if let folder = conversation.folder, folders.shortcut(for: folder) == nil {
                 Button("Save as Shortcut /\(FolderShortcutStore.slug(folder.lastPathComponent))") {
                     let shortcut = folders.add(folder)

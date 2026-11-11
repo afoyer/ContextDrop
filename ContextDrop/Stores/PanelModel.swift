@@ -19,7 +19,26 @@ enum HomeItem: Identifiable, Equatable {
     }
 }
 
+/// What the panel asks the rest of the app to do.
+struct PanelActions {
+    var hide: () -> Void = {}
+    var show: () -> Void = {}
+    /// Opens a chat as a tab in the workspace window.
+    var expand: (UUID) -> Void = { _ in }
+    var openSettings: () -> Void = {}
+    var chooseFolder: (UUID) -> Void = { _ in }
+    var captureScreenshot: () -> Void = {}
+    var pickImages: () -> Void = {}
+    var addFolderShortcut: () -> Void = {}
+    var openRoom: () -> Void = {}
+    /// "To room": puts an answer on the table of the room you're in.
+    var sendToRoom: (Message, Conversation) -> Void = { _, _ in }
+    /// "To room" on a whole tab: a Claude Code run becomes a run tile, an OpenAI chat a chat tile.
+    var sendTabToRoom: (Conversation) -> Void = { _ in }
+}
+
 /// What the floating panel is showing, and the keyboard logic behind it.
+/// Attachments and drops, slash commands and the share flow are in the `PanelModel+…` files.
 @MainActor
 @Observable
 final class PanelModel {
@@ -71,12 +90,12 @@ final class PanelModel {
     /// Activity log filter per chat: nil = all, "main", or a subagent id.
     var activityFilter: [UUID: String] = [:]
     var prep: SharePrep?
-    @ObservationIgnored private var summaryTask: Task<Void, Never>?
-    @ObservationIgnored private var summaryToken: UUID?
-    /// Several tabs being shared together.
+    @ObservationIgnored var summaryTask: Task<Void, Never>?
+    @ObservationIgnored var summaryToken: UUID?
+    /// Several tabs being shared together. (The share flow is in PanelModel+Share.swift.)
     var multiShare: MultiSharePrep?
     /// Tabs travelling with the share in `.send` (the first one is the mode's share).
-    @ObservationIgnored private var extraShares: [(conversationID: UUID, share: ShareSummary)] = []
+    @ObservationIgnored var extraShares: [(conversationID: UUID, share: ShareSummary)] = []
     /// Bumped to ask the active input to take focus.
     var focusToken = 0
     var copiedMessageID: UUID?
@@ -95,20 +114,8 @@ final class PanelModel {
         didSet { AppDefaults.showTerminal = showTerminal }
     }
 
-    // Wired by the AppDelegate.
-    @ObservationIgnored var onHide: (() -> Void)?
-    @ObservationIgnored var onExpand: ((UUID) -> Void)?
-    @ObservationIgnored var onOpenSettings: (() -> Void)?
-    @ObservationIgnored var onChooseFolder: ((UUID) -> Void)?
-    @ObservationIgnored var onCaptureScreenshot: (() -> Void)?
-    @ObservationIgnored var onPickImages: (() -> Void)?
-    @ObservationIgnored var onAddFolderShortcut: (() -> Void)?
-    @ObservationIgnored var onShow: (() -> Void)?
-    @ObservationIgnored var onOpenRoom: (() -> Void)?
-    /// "To room": puts an answer on the table of the room you're in.
-    @ObservationIgnored var onSendToRoom: ((Message, Conversation) -> Void)?
-    /// "To room" on a whole tab: a Claude Code run becomes a run tile, an OpenAI chat a chat tile.
-    @ObservationIgnored var onSendTabToRoom: ((Conversation) -> Void)?
+    /// What the panel asks the app to do (wired by the AppDelegate and the panel's controller).
+    @ObservationIgnored var actions = PanelActions()
     /// Whether "To room" is offered (you're in a live room).
     var roomActive = false
 
@@ -214,7 +221,7 @@ final class PanelModel {
         case .home, .chat:
             let current = session(panelConversationID)
             if current.slashQuery != nil { current.draft = ""; return } // close the / list first
-            onHide?()
+            actions.hide()
             mode = .home
             homeSession.resetComposer()
             homeFolder = nil
@@ -226,10 +233,10 @@ final class PanelModel {
             multiShare?.task?.cancel()
             multiShare = nil
             mode = .home
-            onHide?()
+            actions.hide()
         case .send(let id, _):
             if let outgoing = peers.outgoing, outgoing.phase == .waiting || outgoing.phase == .sending {
-                onHide?() // sending continues in the background
+                actions.hide() // sending continues in the background
             } else if multiShare != nil {
                 peers.clearOutgoing()
                 extraShares = []
@@ -300,361 +307,9 @@ final class PanelModel {
         }
     }
 
-    // MARK: Attachments
-
-    func attach(_ items: [Attachment], to target: ChatSession? = nil) {
-        let session = target ?? activeSession
-        // The limit is for images and files. Pasted links and text are only text, so they don't count.
-        let free = items.filter { !$0.countsTowardLimit }
-        let limited = items.filter(\.countsTowardLimit)
-        let room = Attachments.maxPerMessage - session.pendingAttachments.filter(\.countsTowardLimit).count
-        if !limited.isEmpty, room <= 0 { notices.text = "Up to \(Attachments.maxPerMessage) images or files per message." }
-        guard !free.isEmpty || room > 0 else { return }
-        withAnimation(Motion.keep(reduceMotion)) { session.pendingAttachments += free + limited.prefix(max(room, 0)) }
-        session.requestFocus()
-        focusToken += 1
-    }
-
-    func removeAttachment(_ id: UUID, from target: ChatSession? = nil) {
-        let session = target ?? activeSession
-        withAnimation(Motion.keep(reduceMotion)) { session.pendingAttachments.removeAll { $0.id == id } }
-    }
-
-    /// ⌘V with something that should not fill the input: an image (or copied image files), a web link,
-    /// or a long block of text. Each becomes a chip above the input. Returns false to let a normal text paste happen.
-    func pasteAsAttachment(into target: ChatSession? = nil) -> Bool {
-        pasteImageIfAny(into: target) || pasteLinkOrLongText(into: target)
-    }
-
-    /// ⌘V seen by a window's key monitor, before the text field pastes. Only acts while a text field is being typed in.
-    func pasteKey(in window: NSWindow?, session: ChatSession) -> Bool {
-        guard window?.firstResponder is NSTextView else { return false }
-        return pasteAsAttachment(into: session)
-    }
-
-    private func pasteLinkOrLongText(into target: ChatSession?) -> Bool {
-        let session = target ?? activeSession
-        guard NSPasteboard.general.availableType(from: [.fileURL]) == nil,
-              let text = NSPasteboard.general.string(forType: .string) else { return false }
-        guard let item = Attachments.link(text) ?? (Attachments.isLongPaste(text) ? Attachments.pastedText(text) : nil) else { return false }
-        // The same link twice is one chip.
-        if let link = item.link, session.pendingAttachments.contains(where: { $0.link == link }) { return true }
-        attach([item], to: target)
-        return true
-    }
-
-    private func pasteImageIfAny(into target: ChatSession? = nil) -> Bool {
-        guard Attachments.pasteboardHasImage() else { return false }
-        // Text wins when the clipboard has both (e.g. copying from a web page).
-        if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty,
-           NSPasteboard.general.availableType(from: [.fileURL]) == nil { return false }
-        let items = Attachments.fromPasteboard()
-        guard !items.isEmpty else { return false }
-        attach(items, to: target)
-        return true
-    }
-
-    /// Images are copied in; other files are attached by reference (a coding agent reads them itself).
-    func attachDropped(_ urls: [URL], to target: ChatSession? = nil) {
-        let items = urls.compactMap { url in Attachments.isImage(url) ? Attachments.importFile(url) : Attachments.reference(url) }
-        if items.isEmpty { notices.text = "Couldn’t attach that." } else { attach(items, to: target) }
-    }
-
-    /// What a drop does, for the three drop targets.
-    enum DropAction { case attach, runSkill, newTab }
-
-    /// Files dropped on the panel, a tab or the menu bar icon.
-    func handleDrop(_ urls: [URL], action: DropAction, in conversationID: UUID?) {
-        if let file = urls.first(where: { $0.pathExtension.lowercased() == "contextdrop" }) {
-            if let share = store.ingestFile(file) { continueChat(share) }
-            return
-        }
-        var isDir: ObjCBool = false
-        let folders = urls.filter { FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDir) && isDir.boolValue
-            && !((try? $0.resourceValues(forKeys: [.isPackageKey]))?.isPackage ?? false) }
-        let files = urls.filter { !folders.contains($0) }
-        if let folder = folders.first {
-            if action == .newTab || conversationID == nil {
-                // "New tab here" / home: a coding agent in that folder.
-                let shortcut = store.folders.add(folder)
-                if action == .newTab, let deep = store.preferredDeepProvider() {
-                    let id = store.newConversation(provider: deep)
-                    store.setFolder(folder, for: id)
-                    openInWorkspace(id)
-                } else {
-                    homeFolder = shortcut
-                    notices.text = "Using /\(shortcut.name) → \(shortcut.display)."
-                }
-            } else if let id = conversationID {
-                // "Use as working folder".
-                if store.conversation(id)?.provider.isDeep == false, let deep = store.preferredDeepProvider() {
-                    store.setProvider(deep, for: id)
-                }
-                store.setFolder(folder, for: id)
-                notices.text = "Working folder: \(FolderDrop.display(folder))."
-            }
-        }
-        guard !files.isEmpty else { return }
-        switch action {
-        case .newTab:
-            let provider = files.contains(where: { !Attachments.isImage($0) }) ? (store.preferredDeepProvider() ?? store.defaultProvider) : store.defaultProvider
-            let id = store.newConversation(provider: provider)
-            if provider.isDeep, let folder = AppDefaults.lastFolder ?? AppDefaults.folder { store.setFolder(folder, for: id) }
-            attachDropped(files, to: session(id))
-            openInWorkspace(id)
-        case .attach, .runSkill:
-            let target = session(conversationID)
-            attachDropped(files, to: target)
-            if action == .runSkill {
-                target.draft = target.draft.isEmpty ? "/" : target.draft + " /"
-                SkillCatalog.shared.refresh(projectFolder: conversationID.flatMap { store.conversation($0)?.folder })
-            }
-            target.requestFocus()
-        }
-    }
-
     /// Opens a conversation as a tab in the workspace window.
     func openInWorkspace(_ id: UUID) {
-        onExpand?(id)
-    }
-
-    func submitFromHome() {
-        let parsed = SlashCommand.parseChain(draft, folders: store.folders)
-        let text = parsed.rest
-        var explicitProvider: ProviderKind?
-        var autoRequested = false
-        var folder = homeFolder?.url
-        var skills = homeSession.skills
-
-        for command in parsed.commands {
-            switch command {
-            case .skill(let name):
-                if !skills.contains(name) { skills.append(name) }
-            case .action(let action):
-                draft = text
-                switch action {
-                case .room: onOpenRoom?()
-                case .share, .folder: notices.text = "Open a chat first, then use /\(action.rawValue)."
-                }
-                return
-            case .addFolder:
-                homeFolder = folder.flatMap { store.folders.shortcut(for: $0) }
-                draft = text
-                onAddFolderShortcut?()
-                return
-            case .auto:
-                explicitProvider = nil
-                autoRequested = true
-            case .provider(let provider):
-                explicitProvider = provider
-                autoRequested = false
-            case .folder(let shortcut):
-                guard shortcut.exists else { notices.text = "/\(shortcut.name) points to a folder that no longer exists (\(shortcut.display))."; return }
-                folder = shortcut.url
-            }
-        }
-        if let explicitProvider, !store.status(explicitProvider).isUsable {
-            notices.text = "\(explicitProvider.displayName): \(store.status(explicitProvider).detail)"
-            return
-        }
-        if autoRequested && !store.autoAvailable {
-            notices.text = "Auto is unavailable until OpenAI is ready."
-            return
-        }
-        // Skills run in Claude Code.
-        if !skills.isEmpty && explicitProvider?.supportsSkills != true {
-            let provider = ProviderKind.forSkills
-            guard store.status(provider).isUsable else {
-                notices.text = "Skills need \(provider.displayName): \(store.status(provider).detail)"
-                return
-            }
-            explicitProvider = provider
-            autoRequested = false
-        }
-        if text.isEmpty && pendingAttachments.isEmpty && !parsed.commands.isEmpty {
-            if !skills.isEmpty {
-                homeSession.skills = skills
-                draft = ""
-                focusToken += 1
-                return
-            }
-            homeFolder = folder.flatMap { store.folders.shortcut(for: $0) }
-            if let explicitProvider {
-                selectProvider(explicitProvider, for: nil)
-            } else if folder != nil && !autoRequested && !store.autoActive {
-                guard let deep = (store.defaultProvider.isDeep ? store.defaultProvider : nil)
-                    ?? store.preferredDeepProvider() else {
-                    notices.text = "Folder shortcuts need Claude Code or Codex on this Mac."
-                    return
-                }
-                selectProvider(deep, for: nil)
-            }
-            if autoRequested { selectAuto() }
-            draft = ""
-            focusToken += 1
-            return
-        }
-
-        if text.isEmpty && pendingAttachments.isEmpty {
-            openSelected()
-            return
-        }
-        // A folder picks a coding agent unless Auto or a provider was explicitly selected.
-        if folder != nil && explicitProvider == nil && !autoRequested && !store.autoActive {
-            guard let deep = (!store.autoRoute && store.defaultProvider.isDeep ? store.defaultProvider : nil)
-                ?? store.preferredDeepProvider() else {
-                notices.text = "Folder shortcuts need Claude Code or Codex on this Mac."
-                return
-            }
-            explicitProvider = deep
-        }
-
-        let auto = autoRequested || (explicitProvider == nil && store.autoActive)
-        let provider = explicitProvider ?? store.defaultProvider
-        let id = store.newConversation(provider: provider)
-        let attachments = pendingAttachments
-        homeSession.resetComposer()
-        homeFolder = nil
-        withAnimation(Motion.resize(reduceMotion)) { mode = .chat(id) }
-        composerFocused(id, inWindow: false)
-
-        if auto {
-            if let folder { store.setFolder(folder, for: id) }
-            Task { @MainActor in
-                if await store.askAuto(text, attachments: attachments, in: id) { onChooseFolder?(id) }
-            }
-            return
-        }
-        if provider.isDeep {
-            if let target = folder ?? AppDefaults.folder ?? AppDefaults.lastFolder {
-                store.setFolder(target, for: id)
-            }
-        }
-        store.ask(text, attachments: attachments, skills: skills, in: id)
-        // A deep chat without a folder keeps the question and answers it once one is chosen.
-        if provider.isDeep && store.conversation(id)?.folder == nil { onChooseFolder?(id) }
-    }
-
-    // MARK: Slash commands
-
-    /// The home input's "/" token (see `ChatSession.slashQuery`).
-    var slashQuery: String? { homeSession.slashQuery }
-    var slashMatches: [SlashItem] { slashMatches(in: homeSession) }
-
-    func slashMatches(in session: ChatSession) -> [SlashItem] {
-        session.slashMatches(autoAvailable: store.autoAvailable)
-    }
-
-    func moveSlash(_ delta: Int, in target: ChatSession? = nil) {
-        let session = target ?? homeSession
-        let count = slashMatches(in: session).count
-        guard count > 0 else { return }
-        session.slashSelection = (session.slashSelection + delta + count) % count
-    }
-
-    func selectedSlashItem(in session: ChatSession) -> SlashItem? {
-        let matches = slashMatches(in: session)
-        return matches.isEmpty ? nil : matches[min(session.slashSelection, matches.count - 1)]
-    }
-
-    /// Tab / ↵ on the list: complete only the active token. Skills become chips instead of text.
-    func completeSlash(in target: ChatSession? = nil) {
-        let session = target ?? homeSession
-        guard let item = selectedSlashItem(in: session) else { return }
-        session.slashSelection = 0
-        if item.token == "add" {
-            session.draft = ""
-            onAddFolderShortcut?()
-            return
-        }
-        guard let slash = session.draft.lastIndex(of: "/") else { return }
-        if item.kind == .skill {
-            session.draft = String(session.draft[..<slash])
-            if !session.skills.contains(item.token) { session.skills.append(item.token) }
-        } else {
-            session.draft = String(session.draft[..<slash]) + "/\(item.token) "
-        }
-        session.requestFocus()
-        focusToken += 1
-    }
-
-    /// ⌥↵ on a skill: use it with every message in this chat.
-    @discardableResult
-    func pinSelectedSkill(in session: ChatSession) -> Bool {
-        guard let id = session.conversationID, let item = selectedSlashItem(in: session), item.kind == .skill,
-              var pinned = store.conversation(id)?.pinnedSkills else { return false }
-        if !pinned.contains(item.token) { pinned.append(item.token) }
-        store.setPinnedSkills(pinned, for: id)
-        if let slash = session.draft.lastIndex(of: "/") { session.draft = String(session.draft[..<slash]) }
-        session.slashSelection = 0
-        return true
-    }
-
-    func unpinSkill(_ name: String, in id: UUID) {
-        guard let pinned = store.conversation(id)?.pinnedSkills else { return }
-        store.setPinnedSkills(pinned.filter { $0 != name }, for: id)
-    }
-
-    /// ↵ from either kind of input.
-    func submit(_ session: ChatSession) {
-        if let id = session.conversationID { submitInChat(id) } else { submitFromHome() }
-    }
-
-    /// Applies a leading slash command typed in an existing chat. Returns true if there is still something to ask.
-    private func applySlash(in id: UUID) -> Bool {
-        let input = session(id)
-        let parsed = SlashCommand.parseChain(input.draft, folders: store.folders)
-        guard !parsed.commands.isEmpty else { return true }
-        guard let conversation = store.conversation(id) else { return false }
-        var provider = conversation.provider
-        var folder: URL?
-        for command in parsed.commands {
-            switch command {
-            case .addFolder:
-                input.draft = parsed.rest
-                onAddFolderShortcut?()
-                return false
-            case .skill(let name):
-                if !input.skills.contains(name) { input.skills.append(name) }
-            case .action(let action):
-                input.draft = parsed.rest
-                switch action {
-                case .share: beginShare(id)
-                case .room: onOpenRoom?()
-                case .folder: onChooseFolder?(id)
-                }
-                return false
-            case .auto:
-                notices.text = "Auto picks the assistant for new chats. This chat keeps \(provider.displayName)."
-            case .provider(let selected):
-                guard store.status(selected).isUsable else {
-                    notices.text = "\(selected.displayName): \(store.status(selected).detail)"; return false
-                }
-                provider = selected
-            case .folder(let shortcut):
-                guard shortcut.exists else { notices.text = "/\(shortcut.name) points to a folder that no longer exists."; return false }
-                if !provider.isDeep {
-                    guard let deep = store.preferredDeepProvider() else { notices.text = "Folder shortcuts need Claude Code or Codex on this Mac."; return false }
-                    provider = deep
-                }
-                folder = shortcut.url
-            }
-        }
-        if provider != conversation.provider { store.setProvider(provider, for: id) }
-        if let folder { store.setFolder(folder, for: id) }
-        input.draft = parsed.rest
-        if !input.skills.isEmpty, store.conversation(id)?.provider.supportsSkills != true {
-            notices.text = "Skills run in \(ProviderKind.forSkills.displayName). Switch this chat with /\(ProviderKind.forSkills.slashTokens[0]), or start a new one."
-            input.skills = []
-        }
-        if store.conversation(id)?.provider.isDeep == true, store.conversation(id)?.folder == nil {
-            if parsed.rest.isEmpty && input.pendingAttachments.isEmpty {
-                onChooseFolder?(id)
-                return false
-            }
-        }
-        input.requestFocus()
-        return !parsed.rest.isEmpty || !input.pendingAttachments.isEmpty
+        actions.expand(id)
     }
 
     func moveSelection(_ delta: Int) {
@@ -714,12 +369,12 @@ final class PanelModel {
         let skills = input.skills
         if conversation.provider.isDeep && conversation.folder == nil {
             if conversation.messages.last?.role == .user {
-                onChooseFolder?(id)
+                actions.chooseFolder(id)
                 return
             }
             input.resetComposer()
             store.ask(text, attachments: attachments, skills: skills, in: id)
-            onChooseFolder?(id)
+            actions.chooseFolder(id)
             return
         }
         input.resetComposer()
@@ -754,13 +409,13 @@ final class PanelModel {
     func sendFocusedToRoom(in id: UUID) {
         guard roomActive, let conversation = store.conversation(id) else { return }
         if conversation.provider.roomShare == .liveRun {
-            onSendTabToRoom?(conversation)
+            actions.sendTabToRoom(conversation)
             return
         }
         let input = session(id)
         guard let message = conversation.messages.first(where: { $0.id == input.focusedMessageID })
                 ?? conversation.messages.last(where: { $0.role == .assistant && $0.error == nil && !$0.text.isEmpty }) else { return }
-        onSendToRoom?(message, conversation)
+        actions.sendToRoom(message, conversation)
     }
 
     func copy(_ message: Message) {
@@ -785,7 +440,7 @@ final class PanelModel {
         guard store.status(provider).isUsable else { return }
         if let id {
             store.setProvider(provider, for: id, asDefault: true)
-            if provider.isDeep, store.conversation(id)?.folder == nil { onChooseFolder?(id) }
+            if provider.isDeep, store.conversation(id)?.folder == nil { actions.chooseFolder(id) }
         } else {
             store.defaultProvider = provider
             store.autoRoute = false
@@ -803,145 +458,6 @@ final class PanelModel {
         focusToken += 1
     }
 
-    // MARK: Share flow
-
-    /// ⌘⇧S: widen to the checklist and ask OpenAI for the brief while the panel opens.
-    // MARK: Sharing several tabs (R3 board 4)
-
-    /// The given tabs arrive ticked; the other open tabs are listed unticked.
-    func beginMultiShare(_ ids: [UUID]) {
-        let candidates = workspace.tabs.filter { store.conversation($0)?.messages.isEmpty == false }
-        guard !candidates.isEmpty else { return }
-        multiShare = MultiSharePrep(items: candidates.map { .init(id: $0, included: ids.contains($0)) })
-        prep = nil
-        extraShares = []
-        peers.clearOutgoing()
-        withAnimation(Motion.shareMode(reduceMotion)) { mode = .shareTabs }
-        focusToken += 1
-    }
-
-    /// Writes a summary for each ticked tab, then goes to Choose Person (or AirDrop).
-    func prepareMultiShare(airDrop: Bool) {
-        guard let multi = multiShare, multi.phase.canStart else { return }
-        let chosen = multi.items.filter(\.included).compactMap { store.conversation($0.id) }
-        guard !chosen.isEmpty else { return }
-        multi.phase = .summarizing(done: 0, total: chosen.count)
-        multi.task = Task { @MainActor in
-            var built: [(conversationID: UUID, share: ShareSummary)] = []
-            for (index, conversation) in chosen.enumerated() {
-                let item = SharePrep(conversation: conversation)
-                do {
-                    item.apply(try await OpenAIClient.fromSettings().summarize(conversation, detail: item.detail))
-                } catch {
-                    if Task.isCancelled { return }
-                    let reason = error.userMessage
-                    multi.phase = .failed("Couldn’t summarize “\(conversation.title)”. \(reason)")
-                    return
-                }
-                guard !Task.isCancelled, multiShare === multi else { return }
-                built.append((conversation.id, item.share(of: conversation, from: store.peers)))
-                multi.phase = .summarizing(done: index + 1, total: chosen.count)
-            }
-            guard let first = built.first else { return }
-            if airDrop {
-                do { try ShareFile.airDrop(built.map(\.share)) } catch { notices.text = "AirDrop isn’t available on this Mac." }
-                multi.phase = .choosing
-                return
-            }
-            extraShares = Array(built.dropFirst())
-            peers.clearOutgoing()
-            withAnimation(Motion.shareMode(reduceMotion)) { mode = .send(conversationID: first.conversationID, share: first.share) }
-        }
-    }
-
-    func beginShare(_ id: UUID) {
-        multiShare = nil
-        extraShares = []
-        guard let conversation = store.conversation(id), !conversation.messages.isEmpty else { return }
-        let prep = SharePrep(conversation: conversation)
-        self.prep = prep
-        withAnimation(Motion.shareMode(reduceMotion)) { mode = .share(id) }
-        summarize(prep, conversation: conversation)
-    }
-
-    /// Brief ↔ Detailed: remembered, and the brief is rewritten at the new level.
-    func setShareDetail(_ detail: ShareDetail) {
-        guard let prep, prep.detail != detail else { return }
-        prep.detail = detail
-        AppDefaults.shareDetail = detail
-        regenerateSummary()
-    }
-
-    func regenerateSummary() {
-        guard let prep, let conversation = store.conversation(prep.conversationID) else { return }
-        summarize(prep, conversation: conversation)
-    }
-
-    private func summarize(_ prep: SharePrep, conversation: Conversation) {
-        summaryTask?.cancel()
-        let token = UUID()
-        summaryToken = token
-        let detail = prep.detail
-        prep.phase = .summarizing
-        summaryTask = Task { @MainActor in
-            defer { if summaryToken == token { summaryTask = nil; summaryToken = nil } }
-            do {
-                let draft = try await OpenAIClient.fromSettings().summarize(conversation, detail: detail)
-                guard !Task.isCancelled, summaryToken == token, self.prep === prep else { return }
-                withAnimation(Motion.streaming(reduceMotion)) { prep.apply(draft) }
-            } catch {
-                guard !Task.isCancelled, summaryToken == token, self.prep === prep else { return }
-                prep.phase = .failed(error.userMessage)
-                // Still allow a hand-written summary.
-                if prep.summary.isEmpty { prep.isEditingSummary = true }
-            }
-        }
-    }
-
-    func choosePerson() {
-        guard let prep, let conversation = store.conversation(prep.conversationID) else { return }
-        if case .failed = prep.phase, !prep.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { prep.phase = .ready }
-        guard prep.canContinue else { return }
-        let share = prep.share(of: conversation, from: store.peers)
-        peers.clearOutgoing()
-        withAnimation(Motion.shareMode(reduceMotion)) { mode = .send(conversationID: conversation.id, share: share) }
-    }
-
-    func send(to peer: NearbyPeer) {
-        guard case .send(_, let share) = mode else { return }
-        withAnimation(Motion.drop(reduceMotion)) { peers.send(share, extras: extraShares.map(\.share), to: peer.peerID) }
-    }
-
-    /// Called when the transfer is acknowledged: check, haptic, then back to the chat with a badge.
-    func deliveryConfirmed() {
-        guard case .send(let id, _) = mode, let outgoing = peers.outgoing, outgoing.phase == .delivered else { return }
-        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-        store.markShared(id, with: outgoing.peerName)
-        for extra in extraShares { store.markShared(extra.conversationID, with: outgoing.peerName) }
-        let wasMulti = multiShare != nil
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1.2))
-            guard case .send(let current, _) = mode, current == id else { return }
-            peers.clearOutgoing()
-            prep = nil
-            extraShares = []
-            if wasMulti {
-                // Shared from the window: the tabs are still there, so the panel just goes away.
-                multiShare = nil
-                workspace.multiSelection.removeAll()
-                mode = .home
-                onHide?()
-            } else {
-                withAnimation(Motion.shareMode(reduceMotion)) { mode = .chat(id) }
-            }
-            focusToken += 1
-        }
-    }
-
-    func chooseSomeoneElse() {
-        peers.clearOutgoing()
-    }
-
     // MARK: Receiving
 
     func decline(_ offer: IncomingOffer) {
@@ -955,7 +471,7 @@ final class PanelModel {
         guard open else { return }
         peers.markSeen(offer)
         withAnimation(Motion.summon(reduceMotion)) { mode = .offer(offer.id) }
-        onShow?()
+        actions.show()
     }
 
     /// A share arrived (Continue) or was opened from a file / the list: start the private continued chat.

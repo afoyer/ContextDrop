@@ -26,7 +26,7 @@ struct QuickChatView: View {
             .background {
                 // Panel-wide shortcuts that must work regardless of which control has focus.
                 Group {
-                    Button("Settings") { model.onOpenSettings?() }.keyboardShortcut(",", modifiers: .command)
+                    Button("Settings") { model.actions.openSettings() }.keyboardShortcut(",", modifiers: .command)
                     Button("New chat") { model.newChat() }.keyboardShortcut("n", modifiers: .command)
                     Button("New tab") { model.newChat() }.keyboardShortcut("t", modifiers: .command)
                     Button("Close tab") { if let id = model.panelConversationID { model.closePanelTab(id) } else { model.escape() } }
@@ -35,7 +35,7 @@ struct QuickChatView: View {
                     Button("Previous tab") { model.stepPanelTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
                     Button("Activity") { if model.activeConversationID.flatMap({ model.store.conversation($0) })?.provider.isDeep == true { model.toggleTerminal() } }
                         .keyboardShortcut("a", modifiers: [.command, .option])
-                    Button("Open a room") { model.onOpenRoom?() }
+                    Button("Open a room") { model.actions.openRoom() }
                         .keyboardShortcut("r", modifiers: [.command, .option])
                 }
                 .opacity(0)
@@ -265,7 +265,7 @@ struct HomeView: View {
         case .return:
             if press.modifiers.contains(.command) {
                 let items = model.homeItems
-                if items.indices.contains(model.selection), case .chat(let c) = items[model.selection] { model.onExpand?(c.id) }
+                if items.indices.contains(model.selection), case .chat(let c) = items[model.selection] { model.actions.expand(c.id) }
                 return .handled
             }
             if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored } // newline
@@ -551,7 +551,7 @@ struct ProviderMenu: View {
                 }
                 Spacer()
                 if case .missingKey = status {
-                    Button("Settings…") { model.onOpenSettings?() }.controlSize(.small)
+                    Button("Settings…") { model.actions.openSettings() }.controlSize(.small)
                 } else if case .notFound = status, let url = kind.installURL {
                     Link("How to install", destination: url)
                         .font(.system(size: 11))

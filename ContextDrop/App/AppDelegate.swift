@@ -29,16 +29,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         setUpMenuBar()
         shortcuts.onChange = { [weak self] shortcut in self?.menuBar.shortcut = shortcut.display }
 
-        panelModel.onExpand = { [weak self] id in self?.openInWorkspace(id) }
-        panelModel.onOpenSettings = { [weak self] in self?.openSettings() }
-        panelModel.onChooseFolder = { [weak self] id in self?.chooseFolder(for: id) }
-        panelModel.onCaptureScreenshot = { [weak self] in self?.captureScreenshot() }
-        panelModel.onPickImages = { [weak self] in self?.pickImages() }
-        panelModel.onAddFolderShortcut = { [weak self] in self?.addFolderShortcut() }
-        panelModel.onShow = { [weak self] in self?.quickChat.show() }
-        panelModel.onOpenRoom = { [weak self] in self?.openRoom() }
-        panelModel.onSendToRoom = { [weak self] message, conversation in self?.sendToRoom(message, from: conversation) }
-        panelModel.onSendTabToRoom = { [weak self] conversation in self?.sendTabToRoom(conversation) }
+        panelModel.actions.expand = { [weak self] id in self?.openInWorkspace(id) }
+        panelModel.actions.openSettings = { [weak self] in self?.openSettings() }
+        panelModel.actions.chooseFolder = { [weak self] id in self?.chooseFolder(for: id) }
+        panelModel.actions.captureScreenshot = { [weak self] in self?.captureScreenshot() }
+        panelModel.actions.pickImages = { [weak self] in self?.pickImages() }
+        panelModel.actions.addFolderShortcut = { [weak self] in self?.addFolderShortcut() }
+        panelModel.actions.show = { [weak self] in self?.quickChat.show() }
+        panelModel.actions.openRoom = { [weak self] in self?.openRoom() }
+        panelModel.actions.sendToRoom = { [weak self] message, conversation in self?.sendToRoom(message, from: conversation) }
+        panelModel.actions.sendTabToRoom = { [weak self] conversation in self?.sendTabToRoom(conversation) }
 
         // What counts as "on screen" (never unseen), and which empty chats must survive.
         store.visibleConversations = { [weak self] in
