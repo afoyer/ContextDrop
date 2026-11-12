@@ -202,10 +202,13 @@ struct RoomRunTileView: View {
             HStack {
                 section("Live log")
                 Spacer()
-                Text("last \(min(run.log.count, 6)) events").font(.system(size: 11)).foregroundStyle(.tertiary)
+                if !run.log.isEmpty {
+                    Text("last \(min(run.log.count, 6)) events").font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
             }
             if run.log.isEmpty {
-                Text("Nothing yet").font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
+                // Either nothing has happened yet, or the owner shares steps only.
+                Text("No log lines shared").font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
             }
             ForEach(run.log.suffix(6)) { line in
                 RoomRunLogLine(text: line.text)

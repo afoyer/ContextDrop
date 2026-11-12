@@ -40,7 +40,10 @@ struct RoomShareChip: View {
     // MARK: Not in the room yet
 
     private var shareButton: some View {
-        Button { choosing = true } label: {
+        Button {
+            choice = .level(model.lastShareLevel)
+            choosing = true
+        } label: {
             HStack(spacing: 4) {
                 Image(systemName: "square.grid.2x2")
                 Text("Room")

@@ -806,6 +806,11 @@ final class RoomStore {
     }
 
     private func mergeLog(_ lines: [RunLogLine], into tileID: UUID) {
+        // No log in the update: the owner shows steps only (or turned the log off), so drop what was seen.
+        guard !lines.isEmpty else {
+            if runLogs[tileID] != nil { runLogs[tileID] = nil }
+            return
+        }
         let last = runLogs[tileID]?.last?.seq ?? Int.min
         let new = lines.filter { $0.seq > last }
         guard !new.isEmpty else { return }
