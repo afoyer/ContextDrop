@@ -35,6 +35,10 @@ struct PanelActions {
     var sendToRoom: (Message, Conversation) -> Void = { _, _ in }
     /// "To room" on a whole tab: a Claude Code run becomes a run tile, an OpenAI chat a chat tile.
     var sendTabToRoom: (Conversation) -> Void = { _ in }
+    /// The room chip: put a run in the room at a level, take it out, or change its level (by conversation id).
+    var shareRun: (Conversation, RunShareLevel) -> Void = { _, _ in }
+    var unshareRun: (UUID) -> Void = { _ in }
+    var setShareLevel: (UUID, RunShareLevel) -> Void = { _, _ in }
 }
 
 /// What the floating panel is showing, and the keyboard logic behind it.
@@ -121,6 +125,10 @@ final class PanelModel {
     @ObservationIgnored var actions = PanelActions()
     /// Whether "To room" is offered (you're in a live room).
     var roomActive = false
+    /// The room you're in, for the room chip: its name, how many are here, and which of your runs are in it.
+    var roomName: String?
+    var roomPeople = 0
+    var roomRuns: [UUID: RunShareLevel] = [:]
 
     init(store: ChatStore) {
         self.store = store

@@ -35,6 +35,8 @@ final class RoomStore {
     @ObservationIgnored var viewCenter = CGPoint(x: 480, y: 320)
     /// What this Mac is typing into each chat tile. Never sent; shared by the canvas tile and its popped-out tab.
     var chatDrafts: [UUID: String] = [:]
+    /// This Mac's runs that are in the room (by conversation id) and how much of each is shown. Never sent.
+    private(set) var sharedRuns: [UUID: RunShareLevel] = [:]
 
     @ObservationIgnored let peers: PeerService
     @ObservationIgnored private let service: RoomService
@@ -74,6 +76,8 @@ final class RoomStore {
     /// In a live room (not nil, not ended).
     var isActive: Bool { room != nil && !ended }
     var localName: String { peers.localDisplayName }
+    /// How many people are at the table, this Mac included.
+    var presentCount: Int { members.count }
 
     /// Nearby people who are not at the table yet.
     var invitablePeers: [NearbyPeer] {
@@ -624,13 +628,24 @@ final class RoomStore {
 
     /// Puts one of this Mac's Claude Code or Codex chats in the room as a live tile that people can continue.
     @discardableResult
-    func shareRun(_ conversation: Conversation) -> UUID? {
+    func shareRun(_ conversation: Conversation, level: RunShareLevel = .steps) -> UUID? {
+        // TODO(share-store): pass `level` to the broadcaster and record it in `sharedRuns`.
         guard isActive else { return nil }
         if let existing = runs.tileID(for: conversation.id), tile(existing) != nil { return existing }
         guard let snapshot = runs.snapshot(of: conversation.id),
               let tile = makeTile(.run(snapshot), at: nil, width: RoomMetrics.runWidth), post(.addTile(tile)) else { return nil }
         runs.track(conversation.id, as: tile.id)
         return tile.id
+    }
+
+    /// Takes one of this Mac's runs back out of the room (its tile is removed for everyone; the run goes on here).
+    func unshareRun(conversationID: UUID) {
+        // TODO(share-store)
+    }
+
+    /// Changes how much of a shared run the room sees, from the next update on.
+    func setShareLevel(_ level: RunShareLevel, for conversationID: UUID) {
+        // TODO(share-store)
     }
 
     /// Puts one of this Mac's OpenAI chats in the room as a chat tile: its text, and its images as files.
