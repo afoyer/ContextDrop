@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="ContextDrop logo" width="160">
+</p>
+
 # ContextDrop
 
 *Think together, instantly.* A native macOS app (Swift 6, SwiftUI, Multipeer Connectivity) a menu bar AI chat (OpenAI, Claude Code, Codex) that hands curated context to nearby Macs with no server.
