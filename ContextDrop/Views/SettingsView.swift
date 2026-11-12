@@ -39,6 +39,9 @@ struct SettingsView: View {
 private struct GeneralSettingsTab: View {
     let store: ChatStore
     @State private var name = ""
+    @AppStorage(AppDefaults.preferredCLIKey) private var preferredCLI = AppDefaults.preferredCLI.rawValue
+    @AppStorage(AppDefaults.routeCLIByTaskKey) private var routeCLIByTask = false
+    @AppStorage(AppDefaults.cliWorkPreferencesKey) private var cliWorkPreferences = ""
 
     var body: some View {
         Form {
@@ -53,8 +56,21 @@ private struct GeneralSettingsTab: View {
                 Toggle("Let OpenAI pick the assistant for new chats",
                        isOn: Binding(get: { store.autoRoute }, set: { store.autoRoute = $0 }))
                     .disabled(!store.autoAvailable)
-                Text("One OpenAI Decisions API call (gpt-6-luna) per new chat decides: a quick answer, or Claude Code when the question needs your files. Typing /claude, /quick or a folder shortcut skips it.")
+                Text("Auto favors a coding CLI when you mention a folder or project. Selecting a folder always uses a coding CLI. Use /quick, /claude or /codex to choose explicitly.")
                     .font(.caption).foregroundStyle(.secondary)
+                Picker("Preferred coding CLI", selection: $preferredCLI) {
+                    ForEach(ProviderKind.deep) { Text($0.displayName).tag($0.rawValue) }
+                }
+                Text("Used for Auto and folder shortcuts. If it isn’t ready, the other available CLI is used.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Choose CLI by kind of work in Auto", isOn: $routeCLIByTask)
+                if routeCLIByTask {
+                    TextField("Work preferences", text: $cliWorkPreferences,
+                              prompt: Text("Codex for debugging; Claude Code for UI work"), axis: .vertical)
+                        .lineLimit(2...5)
+                    Text("Describe which work each CLI should handle. Auto uses these preferences in the same routing call, and your preferred CLI when no rule fits.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
@@ -124,9 +140,10 @@ private struct ProviderSettingsTab: View {
                         Text("Read-only: never edit or run commands").tag("readOnly")
                         Text("Ask me each time").tag("ask")
                         Text("Allow file edits, ask for the rest").tag("acceptEdits")
+                        Text("Auto-approve: edits and commands, with a safety check").tag("auto")
                     }
                     .labelsHidden()
-                    Text("Applies to new chats. You can change it for each chat.")
+                    Text("Applies to new chats. You can change it for each chat, or press ⇧Tab while typing.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 6) {

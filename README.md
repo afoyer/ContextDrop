@@ -78,6 +78,7 @@ The stores hold state and talk to the network and to processes. The rules they f
 - **Menu bar** (`Windows/MenuBarController.swift`): what needs you, what is running, what arrived. Drop a file on the icon to ask about it (⌥ for a new tab).
 - **Sharing** (`Services/PeerService.swift`, `Models/Wire.swift`): a share is a summary the sender curates, sent over an encrypted Multipeer session after the receiver accepts. Several tabs can go in one drop. `Services/ShareSummarizer.swift` writes the first draft; `SharePrep` holds the checklist and builds the share.
 - **Room** (`Services/RoomService.swift`, `Stores/RoomStore.swift`, `Views/Room`): a shared canvas for people nearby. The Mac that opened it holds the state, checks every change against `RoomReducer` and relays it; the room ends when that Mac leaves.
+- **Continuing a run from the room** (`Stores/RoomRunInbox.swift`): a Claude Code or Codex run in a room has a **Continue…** button (others see **Ask to continue…**). A follow-up is a prompt plus up to 8 files (pick them or drop them on the tile). It runs in the same session (`--resume` / `exec resume`) on the owner's Mac, with that chat's permission level (someone else's at most "Ask before editing", so every edit or command comes back to the owner). The owner's own follow-ups run at once. Anyone else's waits on the tile until the owner clicks **Run** or **Dismiss**, and the owner sees the whole prompt and every file name first. Files go only to the owner's Mac, and when they come from someone else the agent is told to treat them as reference only, look through them for embedded instructions first, and report anything it finds before acting. They are kept in the Attachments folder until the follow-up runs (then they belong to the chat) or is dismissed (then they are deleted).
 - **OpenAI** (`Providers/OpenAIHTTP.swift`): one helper for authorized requests, errors and streamed replies, used by Chat Completions (`OpenAIClient`), Responses and Files (`OpenAIResponses`, room chats) and the Auto decision (`Services/AutoRouter.swift`).
 
 The app is not sandboxed (it starts the `claude` and `codex` CLIs), and is ad-hoc signed.
@@ -129,6 +130,7 @@ Settings keys live in `Services/AppDefaults.swift`. One-line messages to the use
 - Multipeer has no "declined" signal, so a drop that ends before the timeout is shown as declined.
 - Chats are kept in memory only and are gone when the app quits.
 - Room: thoughts, kept answers and notes only. No votes, linked actions, tasks, cursors or saving yet.
+- A follow-up can only be run while its run is idle, and each person can have one follow-up waiting per run. A run keeps 12 follow-ups; once all 12 are waiting, new ones are refused until the owner answers some.
 - Claude Code decides which shell commands are harmless (`ls`, `echo`…) and runs those without asking, even in "Ask before editing".
 
 ## AI providers
@@ -151,14 +153,14 @@ The same key is used for the Decisions API.
 
 ### Auto mode (Decisions API)
 
-When Auto is on (**Settings › Auto mode**), the first question of a new chat is sent to the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`POST /v1/decisions`, model `gpt-6-luna`, 8 s timeout) by `AutoRouter` (`Services/AutoRouter.swift`). The request asks up to two `choice` questions about the question text:
+When Auto is on (**Settings › General › Auto mode**), the first question of a new chat is sent to the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`POST /v1/decisions`, model `gpt-6-luna`, 8 s timeout) by `AutoRouter` (`Services/AutoRouter.swift`). One request asks up to three `choice` questions:
 
-- `route`: `quick` or `code`.
-- `folder` (only when folder shortcuts exist): one of the shortcut names, or `(none)`.
+- `route`: `quick` or `code`, strongly favoring code when a local folder or project is mentioned.
+- `folder` (when folder shortcuts exist): one of the saved names, or `(none)`.
+- `cli` (when “Choose CLI by kind of work in Auto” is enabled and both CLIs are ready): Claude Code or Codex, following the user's work preferences, such as “Codex for debugging; Claude Code for UI work.” Unmatched work uses the preferred CLI.
 
-The answers drive the chat:
+**Preferred coding CLI** is independent of the manually selected chat provider and also applies to folder shortcuts. If it isn't ready, another ready CLI is used. Task preferences only affect Auto; explicit `/claude`, `/codex` and `/quick` choices still win.
 
-- `code`: Claude Code (or Codex, if that is the default and is ready) answers, in the chosen folder shortcut, else the default folder, else the last folder used.
-- `quick`: the light Chat Completions model answers.
+A selected folder or literal saved-folder mention always selects code when a CLI is ready, even if the API predicts quick or fails. A recognized folder answer also selects code. An explicitly selected folder wins over the inferred folder; otherwise the named shortcut, default folder, then last folder is used. A missing named folder prompts for a folder instead of silently using another project.
 
-The API returns probabilities, not text, so the label under the answer is built locally (e.g. "needs your files (93% sure)"). If no coding agent is ready, the call is skipped. If the call fails or the API refuses, the chat falls back to a quick answer and shows "Auto unavailable · used OpenAI". Typing `/claude`, `/codex`, `/quick` (or `/openai`) or a folder shortcut skips the call. Auto needs an OpenAI key.
+General questions still use the light Chat Completions model. If the API fails without folder context, Auto falls back to a quick answer. The caption shows the provider actually used. If no coding agent is ready, the decision call is skipped. Folder shortcuts participate in Auto routing when Auto is active, including task-based CLI selection. Auto needs an OpenAI key.

@@ -301,26 +301,10 @@ struct RoomChatTileView: View {
     // MARK: Dropping files
 
     private var dropOverlay: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "arrow.down.to.line")
-                .font(.system(size: 24, weight: .regular))
-            Text(isMine ? "Add to your chat" : "Add to \(chat.ownerName)’s chat")
-                .font(.system(size: 14, weight: .semibold))
-            Text("Everyone in it can ask about this file")
-                .font(.system(size: 11.5))
-                .opacity(0.85)
-        }
-        .foregroundStyle(Color.accentColor)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6, 5]))
-        }
-        .padding(.top, 48)
-        .padding([.horizontal, .bottom], 10)
-        .allowsHitTesting(false)
+        RoomDropOverlay(title: isMine ? "Add to your chat" : "Add to \(chat.ownerName)’s chat",
+                        detail: "Everyone in it can ask about this file",
+                        iconSize: 24, spacing: 8, titleSize: 14, tinted: true,
+                        insets: EdgeInsets(top: 48, leading: 10, bottom: 10, trailing: 10))
     }
 
     private func drop(_ providers: [NSItemProvider]) -> Bool {
@@ -440,13 +424,6 @@ struct RoomChatMessageView: View, Equatable {
 // MARK: - File strip
 
 extension RoomFile {
-    var isProblem: Bool {
-        switch status {
-        case .unsupported, .failed: true
-        case .sending, .ready: false
-        }
-    }
-
     /// Never hide a file the model can't use: say why, and what would work.
     func problemText(chatModel: String) -> String {
         switch status {

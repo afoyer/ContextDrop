@@ -191,6 +191,105 @@ final class ConversationReducerTests: XCTestCase {
         XCTAssertThrowsError(try AutoRouter.decision(from: Data("{}".utf8)))
     }
 
+    func testFolderIntentOverridesQuickAndSurvivesAPIFailure() {
+        let shortcut = FolderShortcut(id: UUID(), name: "contextdrop", path: "/projects/ContextDrop")
+        for prediction in [RouteDecision(route: .quick, reason: "general"), .fallback] {
+            for question in ["explain ContextDrop", "review /contextdrop", "summarize /projects/ContextDrop"] {
+                let result = AutoRouter.resolve(prediction, question: question, shortcuts: [shortcut], selectedFolder: nil,
+                    availableCLIs: [.claudeCode, .codex], preferredCLI: .codex, chooseCLIByTask: false)
+                XCTAssertEqual(result.route, .code)
+                XCTAssertEqual(result.provider, .codex)
+                XCTAssertEqual(result.folder, shortcut.name)
+                XCTAssertEqual(result.fellBack, prediction.fellBack)
+            }
+        }
+        let selected = AutoRouter.resolve(.fallback, question: "explain this", shortcuts: [], selectedFolder: "/projects/new",
+            availableCLIs: [.codex], preferredCLI: .claudeCode, chooseCLIByTask: false)
+        XCTAssertEqual(selected.route, .code)
+        XCTAssertEqual(selected.provider, .codex)
+    }
+
+    func testFolderMatchingDoesNotMatchInsideOtherNamesOrTrustUnknownChoices() {
+        let prediction = RouteDecision(route: .quick, folder: "invented", reason: "general")
+        let result = AutoRouter.resolve(prediction, question: "what is application design?",
+            shortcuts: [FolderShortcut(id: UUID(), name: "app", path: "/projects/app")], selectedFolder: nil,
+            availableCLIs: [.codex], preferredCLI: .codex, chooseCLIByTask: false)
+        XCTAssertEqual(result.route, .quick)
+        XCTAssertNil(result.folder)
+        XCTAssertEqual(result.provider, .openAI)
+    }
+
+    func testSemanticFolderChoiceAlsoFavorsCodeButNeedsAReadyCLI() {
+        let shortcut = FolderShortcut(id: UUID(), name: "app", path: "/projects/app")
+        let prediction = RouteDecision(route: .quick, folder: "app", reason: "general")
+        for available: [ProviderKind] in [[.codex], []] {
+            let result = AutoRouter.resolve(prediction, question: "explain my project", shortcuts: [shortcut], selectedFolder: nil,
+                availableCLIs: available, preferredCLI: .codex, chooseCLIByTask: false)
+            XCTAssertEqual(result.route, available.isEmpty ? .quick : .code)
+            XCTAssertEqual(result.provider, available.isEmpty ? .openAI : .codex)
+        }
+    }
+
+    func testTaskPreferenceOnlySelectsAnAvailableCLIWhenEnabled() throws {
+        let data = Data(#"{"answers":[{"name":"route","type":"choice","choice":"code"},{"name":"cli","type":"choice","choice":"codex"}]}"#.utf8)
+        let prediction = try AutoRouter.decision(from: data)
+        XCTAssertEqual(prediction.provider, .codex)
+        for enabled in [false, true] {
+            let result = AutoRouter.resolve(prediction, question: "debug this", shortcuts: [], selectedFolder: nil,
+                availableCLIs: [.claudeCode, .codex], preferredCLI: .claudeCode, chooseCLIByTask: enabled)
+            XCTAssertEqual(result.provider, enabled ? .codex : .claudeCode)
+        }
+        let unavailable = AutoRouter.resolve(prediction, question: "debug this", shortcuts: [], selectedFolder: nil,
+            availableCLIs: [.claudeCode], preferredCLI: .codex, chooseCLIByTask: true)
+        XCTAssertEqual(unavailable.provider, .claudeCode)
+        let refused = try AutoRouter.decision(from: Data(#"{"answers":[{"name":"route","type":"choice","choice":"code"},{"name":"cli","type":"refusal"}]}"#.utf8))
+        let fallback = AutoRouter.resolve(refused, question: "debug this", shortcuts: [], selectedFolder: nil,
+            availableCLIs: [.claudeCode, .codex], preferredCLI: .codex, chooseCLIByTask: true)
+        XCTAssertEqual(fallback.provider, .codex)
+        XCTAssertThrowsError(try AutoRouter.decision(from: Data(#"{"answers":[{"name":"route","type":"choice","choice":"unknown"}]}"#.utf8)))
+    }
+
+    func testTaskPreferencesShareTheRoutingRequestOnlyWhenEnabledAndUseful() {
+        for available: [ProviderKind] in [[.codex], [.claudeCode, .codex]] {
+            for preferences: String? in [nil, "Codex for debugging"] {
+                let body = AutoRouter.body(question: "debug", shortcuts: [], defaultFolder: nil,
+                    selectedFolder: "/project", availableCLIs: available, preferredCLI: .codex, workPreferences: preferences)
+                let questions = body["questions"] as! [[String: Any]]
+                let cli = questions.first { $0["name"] as? String == "cli" }
+                XCTAssertEqual(cli != nil, available.count > 1 && preferences != nil)
+                XCTAssertTrue((questions[0]["instructions"] as! String).contains("/project"))
+                if let cli {
+                    XCTAssertTrue((cli["instructions"] as! String).contains(preferences!))
+                    XCTAssertEqual((cli["choices"] as! [[String: String]]).map { $0["value"]! }, available.map(\.rawValue))
+                }
+            }
+        }
+    }
+
+    func testPreferredCLIMigratesOnceAndStaysIndependentOfManualProvider() {
+        let defaults = UserDefaults.standard
+        let keys = [AppDefaults.preferredCLIKey, AppDefaults.providerKey,
+                    AppDefaults.routeCLIByTaskKey, AppDefaults.cliWorkPreferencesKey]
+        let saved = keys.map { defaults.object(forKey: $0) }
+        defer {
+            for (key, value) in zip(keys, saved) {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+        }
+        defaults.removeObject(forKey: AppDefaults.preferredCLIKey)
+        AppDefaults.provider = .codex
+        XCTAssertEqual(AppDefaults.preferredCLI, .codex)
+        AppDefaults.provider = .openAI
+        XCTAssertEqual(AppDefaults.preferredCLI, .codex)
+        AppDefaults.preferredCLI = .claudeCode
+        AppDefaults.preferredCLI = .openAI
+        XCTAssertEqual(AppDefaults.preferredCLI, .claudeCode)
+        AppDefaults.routeCLIByTask = true
+        AppDefaults.cliWorkPreferences = "Codex for debugging"
+        XCTAssertTrue(AppDefaults.routeCLIByTask)
+        XCTAssertEqual(AppDefaults.cliWorkPreferences, "Codex for debugging")
+    }
+
     func testFolderChoicesAreOnlyOfferedWhenThereAreShortcuts() {
         let body = AutoRouter.body(question: "why does my build fail", shortcuts: [], defaultFolder: nil)
         XCTAssertEqual((body["questions"] as? [[String: Any]])?.count, 1)

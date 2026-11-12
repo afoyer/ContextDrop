@@ -31,6 +31,7 @@ enum RoomReducer {
                 case .run(var run):
                     run.ownerName = sender
                     run.notes = []
+                    run.requests = []
                     tile.content = .run(run)
                 }
             }
@@ -123,10 +124,18 @@ enum RoomReducer {
             return .addFile(id, file)
 
         case .fileStatus(let id, let fileID, let status):
-            guard let i = room.index(of: id), let tile = room.tiles[i].chat,
-                  let j = tile.files.firstIndex(where: { $0.id == fileID }) else { return nil }
-            if let sender, sender != tile.ownerName { return nil }
-            room.updateChat(at: i) { $0.files[j].status = status }
+            guard let i = room.index(of: id) else { return nil }
+            if let sender, sender != room.tiles[i].ownerName { return nil }
+            switch room.tiles[i].content {
+            case .chat(let tile):
+                guard let j = tile.files.firstIndex(where: { $0.id == fileID }) else { return nil }
+                room.updateChat(at: i) { $0.files[j].status = status }
+            case .run(var run):
+                guard run.setFileStatus(fileID, status) else { return nil }
+                room.tiles[i].content = .run(run)
+            case .card:
+                return nil
+            }
             return message
 
         case .removeFile(let id, let fileID, let eventID, let stamped):
@@ -161,11 +170,55 @@ enum RoomReducer {
         case .runUpdate(let id, var run):
             guard let i = room.index(of: id), let current = room.tiles[i].run else { return nil }
             if let sender, sender != current.ownerName { return nil }
-            // Who owns it and the notes people left belong to the room, not to the update.
+            // Who owns it, the notes people left and their follow-ups belong to the room, not to the update.
             run.ownerName = current.ownerName
             run.notes = current.notes
+            run.requests = current.requests
             room.tiles[i].content = .run(run)
             return .runUpdate(id, run)
+
+        case .runRequest(let id, var request):
+            guard let i = room.index(of: id), case .run(var run) = room.tiles[i].content,
+                  !run.requests.contains(where: { $0.id == request.id }) else { return nil }
+            // A follow-up asks for something: some text, or at least a file.
+            guard !request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !request.files.isEmpty else { return nil }
+            // File bytes are matched to follow-ups by file id, so an id may only ever name one file in the room:
+            // otherwise someone could reuse another person's file id and have their bytes land in that follow-up.
+            let fileIDs = Set(request.files.map(\.id))
+            guard fileIDs.count == request.files.count,
+                  !room.tiles.contains(where: { $0.run?.requests.contains { $0.files.contains { fileIDs.contains($0.id) } } == true })
+            else { return nil }
+            if let sender {
+                request.from = sender
+                for j in request.files.indices { request.files[j].addedBy = sender }
+                if sender != run.ownerName {
+                    // One follow-up waiting per person, so nobody can crowd out the others'.
+                    guard !run.requests.contains(where: { $0.from == sender && $0.status == .pending }) else { return nil }
+                    // Only the owner's Mac decides what runs there, and says when a file has arrived.
+                    request.status = .pending
+                    for j in request.files.indices { request.files[j].status = .sending }
+                } else if request.status == .dismissed {
+                    return nil
+                }
+            }
+            // Make room by dropping the oldest answered follow-ups. One still waiting on the owner never disappears:
+            // when every kept follow-up is waiting, the new one is refused (`RoomStore.continueBlocker` says why).
+            while run.requests.count >= RoomLimits.maxRunRequests {
+                guard let k = run.requests.firstIndex(where: { $0.status != .pending }) else { return nil }
+                run.requests.remove(at: k)
+            }
+            run.requests.append(request)
+            room.tiles[i].content = .run(run)
+            return .runRequest(id, request)
+
+        case .runRequestStatus(let id, let requestID, let status):
+            guard status != .pending, let i = room.index(of: id), case .run(var run) = room.tiles[i].content,
+                  let j = run.requests.firstIndex(where: { $0.id == requestID }),
+                  run.requests[j].status == .pending else { return nil }
+            if let sender, sender != run.ownerName { return nil }
+            run.requests[j].status = status
+            room.tiles[i].content = .run(run)
+            return message
 
         case .runNote(let id, var note):
             guard let i = room.index(of: id), case .run(var run) = room.tiles[i].content,
@@ -202,6 +255,18 @@ extension RoomChatTile {
     }
 }
 
+extension RoomRunTile {
+    /// Sets the status of a file in one of the follow-ups. False when no follow-up has it.
+    fileprivate mutating func setFileStatus(_ fileID: UUID, _ status: RoomFile.Status) -> Bool {
+        for r in requests.indices {
+            guard let j = requests[r].files.firstIndex(where: { $0.id == fileID }) else { continue }
+            requests[r].files[j].status = status
+            return true
+        }
+        return false
+    }
+}
+
 extension RoomState {
     func index(of tileID: UUID) -> Int? { tiles.firstIndex { $0.id == tileID } }
 
@@ -211,12 +276,14 @@ extension RoomState {
         tiles[i].content = .chat(chat)
     }
 
-    /// Someone left: their runs can't report any more and their chats stop mid-answer.
+    /// Someone left: their runs can't report any more (or take follow-ups) and their chats stop mid-answer.
     mutating func memberGone(_ name: String) {
         for i in tiles.indices {
             switch tiles[i].content {
-            case .run(var run) where run.ownerName == name && run.isLive:
-                run.state = .waiting("\(name) left the room, so this run is no longer reporting.")
+            case .run(var run) where run.ownerName == name:
+                if run.isLive { run.state = .waiting("\(name) left the room, so this run is no longer reporting.") }
+                // Nobody is left to answer what was waiting on them.
+                for j in run.requests.indices where run.requests[j].status == .pending { run.requests[j].status = .dismissed }
                 tiles[i].content = .run(run)
             case .chat(var chat) where chat.ownerName == name && chat.isStreaming:
                 chat.stopStreaming()

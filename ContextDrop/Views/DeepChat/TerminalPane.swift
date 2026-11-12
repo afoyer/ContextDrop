@@ -110,7 +110,7 @@ struct TerminalPane: View {
                 HStack(spacing: 6) {
                     if let pid = run.pid { chip("pid \(pid)") }
                     if let model = run.model { chip(model) }
-                    chip(run.level.chip, tint: run.level == .acceptEdits ? .orange : nil)
+                    chip(run.level.chip, tint: run.level.changesWithoutAsking ? .orange : nil)
                     if let elapsed = elapsed(run, now: context.date) { chip(elapsed) }
                     if let input = run.inputTokens { chip("\(Self.compact(input)) in · \(Self.compact(run.outputTokens ?? 0)) out") }
                     if let cost = run.costUSD, cost > 0 { chip(String(format: "$%.3f", cost)) }

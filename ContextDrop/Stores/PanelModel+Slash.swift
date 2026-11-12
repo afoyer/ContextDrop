@@ -5,6 +5,28 @@ import SwiftUI
 extension PanelModel {
     // MARK: Home
 
+    /// The coding agent the home input would ask right now (nil for quick answers, Auto routing and actions).
+    /// Decides whether the permission chip shows; mirrors how `submitFromHome` picks the provider.
+    var homeAgent: ProviderKind? {
+        var provider: ProviderKind?
+        var folder = homeFolder
+        var auto = store.autoActive
+        for command in SlashCommand.parseChain(draft, folders: store.folders).commands {
+            switch command {
+            case .provider(let selected): provider = selected; auto = false
+            case .folder(let selected): folder = selected
+            case .auto: provider = nil; auto = true
+            case .skill: provider = .forSkills; auto = false
+            case .addFolder, .action: return nil
+            }
+        }
+        if !homeSession.skills.isEmpty { return .forSkills }
+        if let provider { return provider.isDeep ? provider : nil }
+        if auto { return nil }
+        if store.defaultProvider.isDeep { return store.defaultProvider }
+        return folder != nil ? store.preferredDeepProvider() : nil
+    }
+
     func submitFromHome() {
         let request = SlashRequest(draft: draft, folders: store.folders)
         let text = request.rest
@@ -52,6 +74,22 @@ extension PanelModel {
             autoRequested = false
         }
         if text.isEmpty && pendingAttachments.isEmpty && !request.isEmpty {
+            // Choosing a coding agent starts its setup now, even before there is a question.
+            if request.provider?.isDeep == true, let explicitProvider, explicitProvider.isDeep {
+                selectProvider(explicitProvider, for: nil)
+                let id = store.newConversation(provider: explicitProvider)
+                store.setPermissionLevel(homeLevel, for: id)
+                homeSession.resetComposer()
+                homeFolder = nil
+                session(id).skills = skills
+                openChat(id)
+                if let folder {
+                    store.setFolder(folder, for: id)
+                } else {
+                    actions.chooseFolder(id)
+                }
+                return
+            }
             if !skills.isEmpty {
                 homeSession.skills = skills
                 draft = ""
@@ -92,6 +130,8 @@ extension PanelModel {
         let auto = autoRequested || (explicitProvider == nil && store.autoActive)
         let provider = explicitProvider ?? store.defaultProvider
         let id = store.newConversation(provider: provider)
+        // The chip's level; Auto routing hides the chip, so its chats keep the Settings default.
+        if provider.isDeep && !auto { store.setPermissionLevel(homeLevel, for: id) }
         let attachments = pendingAttachments
         homeSession.resetComposer()
         homeFolder = nil
@@ -106,7 +146,9 @@ extension PanelModel {
             return
         }
         if provider.isDeep {
-            if let target = folder ?? AppDefaults.folder ?? AppDefaults.lastFolder {
+            // An explicit agent command requires an explicit folder for this chat.
+            let target = request.provider?.isDeep == true ? folder : (folder ?? AppDefaults.folder ?? AppDefaults.lastFolder)
+            if let target {
                 store.setFolder(target, for: id)
             }
         }
@@ -137,7 +179,7 @@ extension PanelModel {
         return matches.isEmpty ? nil : matches[min(session.slashSelection, matches.count - 1)]
     }
 
-    /// Tab / ↵ on the list: complete only the active token. Skills become chips instead of text.
+    /// Tab / ↵ on the list: complete the active token. Coding agents start setup; skills become chips.
     func completeSlash(in target: ChatSession? = nil) {
         let session = target ?? homeSession
         guard let item = selectedSlashItem(in: session) else { return }
@@ -156,6 +198,13 @@ extension PanelModel {
         }
         session.requestFocus()
         focusToken += 1
+        if case .provider(let provider) = SlashCommand.command(for: item.token, folders: store.folders), provider.isDeep {
+            let request = SlashRequest(draft: session.draft, folders: store.folders)
+            if request.stop == nil, request.rest.isEmpty, request.provider == provider, !request.auto,
+               session.pendingAttachments.isEmpty {
+                submit(session)
+            }
+        }
     }
 
     /// ⌥↵ on a skill: use it with every message in this chat.

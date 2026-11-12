@@ -33,6 +33,11 @@ enum Attachments {
         return dir
     }
 
+    /// Whether `path` is inside the Attachments folder.
+    static func contains(_ path: String) -> Bool {
+        URL(fileURLWithPath: path).standardizedFileURL.path.hasPrefix(directory.standardizedFileURL.path + "/")
+    }
+
     static let imageTypes: [UTType] = [.png, .jpeg, .heic, .tiff, .gif, .bmp, .webP]
 
     static func isImage(_ url: URL) -> Bool {

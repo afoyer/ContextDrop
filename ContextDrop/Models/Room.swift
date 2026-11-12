@@ -26,6 +26,9 @@ enum RoomLimits {
     static let maxLogLineLength = 240
     static let maxRunNotes = 20
     static let maxNoteLength = 400
+    /// Follow-ups kept on a run tile (pending ones and the most recent answered ones).
+    static let maxRunRequests = 12
+    static let maxFilesPerRequest = 8
     /// The canvas has no edges; this only keeps numbers sane.
     static let coordinateLimit: Double = 1_000_000
     static let maxPayloadBytes = 16 * 1024 * 1024
@@ -210,7 +213,35 @@ struct RunNote: Codable, Sendable, Equatable, Identifiable {
     var text: String
 }
 
-/// A Claude Code run someone put in the room. It stays on `ownerName`'s Mac; the room only gets these summaries.
+/// A follow-up someone sent from the room to continue a run: a prompt and the files that go with it.
+/// It runs on the owner's Mac, in the same session, only once the owner accepts it (their own follow-ups
+/// are accepted as they are sent). The file bytes go to the owner's Mac; everyone else sees the names.
+struct RunRequest: Codable, Sendable, Equatable, Identifiable {
+    enum Status: String, Codable, Sendable {
+        case pending, accepted, dismissed
+    }
+
+    let id: UUID
+    var from: String
+    var text: String
+    var files: [RoomFile] = []
+    var status: Status = .pending
+
+    /// Every file is on the owner's Mac (or failed and will be left out).
+    var filesSettled: Bool { files.allSatisfy { $0.status != .sending } }
+
+    func sanitized() -> RunRequest {
+        var seen = Set<UUID>()
+        var r = self
+        r.from = RoomLimits.name(from)
+        r.text = String(text.prefix(RoomLimits.maxQuestionLength))
+        r.files = files.prefix(RoomLimits.maxFilesPerRequest).map { $0.sanitized() }.filter { seen.insert($0.id).inserted }
+        return r
+    }
+}
+
+/// A Claude Code or Codex run someone put in the room. It stays on `ownerName`'s Mac; the room only gets these
+/// summaries, plus the follow-ups people send to continue it.
 struct RoomRunTile: Codable, Sendable, Equatable {
     enum State: Codable, Sendable, Equatable {
         case running
@@ -221,6 +252,8 @@ struct RoomRunTile: Codable, Sendable, Equatable {
     }
 
     var ownerName: String
+    /// The coding agent's name ("Claude Code", "Codex").
+    var agent = "Claude Code"
     var title: String
     var folder: String
     var state: State = .running
@@ -232,8 +265,12 @@ struct RoomRunTile: Codable, Sendable, Equatable {
     var log: [RunLogLine] = []
     /// Notes people sent the owner ("Ask Camille…").
     var notes: [RunNote] = []
+    /// Follow-ups sent from the room, oldest first.
+    var requests: [RunRequest] = []
     /// The run's final answer, once done.
     var summary: String?
+
+    var pendingRequests: [RunRequest] { requests.filter { $0.status == .pending } }
 
     var isLive: Bool {
         switch state {
@@ -248,7 +285,7 @@ struct RoomRunTile: Codable, Sendable, Equatable {
 
     /// What a chat is told about this run when it is used as context.
     var contextText: String {
-        var lines = ["Claude Code run \"\(title)\" on \(ownerName)'s Mac."]
+        var lines = ["\(agent) run \"\(title)\" on \(ownerName)'s Mac."]
         switch state {
         case .running: lines.append("Status: running.")
         case .waiting(let reason): lines.append("Status: paused. \(reason)")
@@ -273,6 +310,7 @@ struct RoomRunTile: Codable, Sendable, Equatable {
     func sanitized() -> RoomRunTile {
         var t = self
         t.ownerName = RoomLimits.name(ownerName)
+        t.agent = String(agent.prefix(40))
         t.title = String(title.prefix(RoomLimits.maxTitleLength))
         t.folder = String(folder.prefix(120))
         if case .waiting(let reason) = state { t.state = .waiting(String(reason.prefix(200))) }
@@ -287,8 +325,30 @@ struct RoomRunTile: Codable, Sendable, Equatable {
         }
         t.log = log.suffix(RoomLimits.maxLogLines).map { RunLogLine(seq: $0.seq, text: String($0.text.prefix(RoomLimits.maxLogLineLength))) }
         t.notes = notes.suffix(RoomLimits.maxRunNotes).map { $0.sanitized() }
+        var seenRequests = Set<UUID>()
+        t.requests = Self.trimmed(requests.map { $0.sanitized() }.filter { seenRequests.insert($0.id).inserted })
         t.summary = summary.map { String($0.prefix(RoomLimits.maxTextLength)) }
         return t
+    }
+
+    /// At most `maxRunRequests` follow-ups, dropping the oldest answered ones first so the ones still waiting
+    /// on the owner are kept. Only when even those are too many do the oldest of them go.
+    static func trimmed(_ requests: [RunRequest]) -> [RunRequest] {
+        var kept = requests
+        while kept.count > RoomLimits.maxRunRequests, let k = kept.firstIndex(where: { $0.status != .pending }) {
+            kept.remove(at: k)
+        }
+        return Array(kept.suffix(RoomLimits.maxRunRequests))
+    }
+}
+
+extension RoomFile {
+    /// It won't reach the model or agent (unsupported, or it failed on the way).
+    var isProblem: Bool {
+        switch status {
+        case .unsupported, .failed: true
+        case .sending, .ready: false
+        }
     }
 }
 
@@ -426,7 +486,8 @@ struct RoomInvitationContext: Codable, Sendable {
 
 /// One change to the room. Each is sent as one JSON message on the room session (see `RoomWire`).
 enum RoomMessage: Sendable, Equatable {
-    static let currentVersion = 2
+    /// 3: run tiles carry `agent` and `requests` (continuing a run from the room).
+    static let currentVersion = 3
 
     enum Kind: String, Codable, Sendable {
         case hello, snapshot, memberLeft, ended
@@ -434,6 +495,7 @@ enum RoomMessage: Sendable, Equatable {
         case chatMessage, chatDelta
         case addFile, fileStatus, removeFile, requestFiles
         case attachRun, runUpdate, runNote
+        case runRequest, runRequestStatus
     }
 
     case hello(RoomMember)
@@ -454,6 +516,7 @@ enum RoomMessage: Sendable, Equatable {
     case chatDelta(UUID, RoomChatMessage)
 
     case addFile(UUID, RoomFile)
+    /// A file in a chat tile, or in a follow-up on a run tile. Only the tile's owner sends it.
     case fileStatus(UUID, fileID: UUID, RoomFile.Status)
     /// `messageID` names the "x removed the file" line every Mac adds, so it is the same line everywhere.
     /// `by` is who did it: stamped by the host from the peer's name, never taken from the sender's word.
@@ -465,6 +528,10 @@ enum RoomMessage: Sendable, Equatable {
     case attachRun(UUID, to: UUID, messageID: UUID, by: String? = nil)
     case runUpdate(UUID, RoomRunTile)
     case runNote(UUID, RunNote)
+    /// A follow-up to continue run tile `UUID`. Pending until its owner accepts it.
+    case runRequest(UUID, RunRequest)
+    /// The owner accepted or dismissed a follow-up.
+    case runRequestStatus(UUID, requestID: UUID, RunRequest.Status)
 
     var kind: Kind {
         switch self {
@@ -486,6 +553,8 @@ enum RoomMessage: Sendable, Equatable {
         case .attachRun: .attachRun
         case .runUpdate: .runUpdate
         case .runNote: .runNote
+        case .runRequest: .runRequest
+        case .runRequestStatus: .runRequestStatus
         }
     }
 }
@@ -504,7 +573,7 @@ enum RoomWireError: Error, CustomStringConvertible {
     }
 }
 
-/// A room message as JSON (protocol version 2): a kind, plus whichever of these fields that kind uses.
+/// A room message as JSON (protocol version 3): a kind, plus whichever of these fields that kind uses.
 /// Adding a message means a case in `RoomMessage`, and its fields here in `init` and `message()`.
 private struct RoomWire: Codable {
     var version = RoomMessage.currentVersion
@@ -531,6 +600,9 @@ private struct RoomWire: Codable {
     var runID: UUID?
     var run: RoomRunTile?
     var note: RunNote?
+    var request: RunRequest?
+    var requestID: UUID?
+    var requestStatus: RunRequest.Status?
 }
 
 extension RoomWire {
@@ -554,6 +626,8 @@ extension RoomWire {
         case .attachRun(let runID, let chatID, let messageID, let by): (tileID, self.runID, self.messageID, from) = (chatID, runID, messageID, by)
         case .runUpdate(let id, let value): (tileID, run) = (id, value)
         case .runNote(let id, let value): (tileID, note) = (id, value)
+        case .runRequest(let id, let value): (tileID, request) = (id, value)
+        case .runRequestStatus(let id, let requestID, let status): (tileID, self.requestID, requestStatus) = (id, requestID, status)
         }
     }
 
@@ -616,6 +690,12 @@ extension RoomWire {
         case .runNote:
             guard let tileID, let note else { throw missing }
             return .runNote(tileID, note.sanitized())
+        case .runRequest:
+            guard let tileID, let request else { throw missing }
+            return .runRequest(tileID, request.sanitized())
+        case .runRequestStatus:
+            guard let tileID, let requestID, let requestStatus else { throw missing }
+            return .runRequestStatus(tileID, requestID: requestID, requestStatus)
         }
     }
 }

@@ -278,6 +278,10 @@ struct ChatView: View {
     private func handleKey(_ press: KeyPress, _ conversation: Conversation) -> KeyPress.Result {
         let input = session
         if let result = SlashMenu.handle(press, model: model, session: input) { return result }
+        if press.isBackTab {
+            guard conversation.provider.isDeep else { return .ignored }
+            model.cyclePermissionLevel(in: conversation.id); return .handled
+        }
         let cmd = press.modifiers.contains(.command)
         // 1–9 answer a decision while nothing is typed.
         if !cmd, input.draft.isEmpty, let question = conversation.pendingQuestions.first,
@@ -342,43 +346,56 @@ struct ChatBadges: View {
     }
 }
 
-/// How much the agent may do without asking, per chat.
+extension KeyPress {
+    /// ⇧Tab. AppKit reports it as the backtab character (U+0019) rather than shift + "\t".
+    var isBackTab: Bool { characters == "\u{19}" || (key == .tab && modifiers.contains(.shift)) }
+}
+
+/// How much the agent may do without asking: per chat, or for the next chat from the home input.
 struct PermissionLevelMenu: View {
-    let store: ChatStore
-    let conversation: Conversation
+    let level: PermissionLevel
+    /// Short label ("asks first") for tight rows like the home input.
+    var compact = false
+    var help = "What the agent may do without asking. Applies from the next message. ⇧Tab cycles."
+    let select: (PermissionLevel) -> Void
+
+    init(store: ChatStore, conversation: Conversation) {
+        level = conversation.permissionLevel
+        select = { store.setPermissionLevel($0, for: conversation.id) }
+    }
+
+    init(level: PermissionLevel, compact: Bool = false, help: String, select: @escaping (PermissionLevel) -> Void) {
+        self.level = level
+        self.compact = compact
+        self.help = help
+        self.select = select
+    }
 
     var body: some View {
         Menu {
-            ForEach(PermissionLevel.allCases) { level in
+            ForEach(PermissionLevel.allCases) { option in
                 Button {
-                    store.setPermissionLevel(level, for: conversation.id)
+                    select(option)
                 } label: {
-                    Text(level.label)
-                    Text(level.detail)
-                    if conversation.permissionLevel == level { Image(systemName: "checkmark") }
+                    Text(option.label)
+                    Text(option.detail)
+                    if option == level { Image(systemName: "checkmark") }
                 }
             }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: icon)
-                Text(conversation.permissionLevel.label)
+                Image(systemName: level.icon)
+                Text(compact ? level.chip : level.label)
             }
             .font(.system(size: 12))
+            .foregroundStyle(level == .auto ? Color.orange : Color.primary)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
         .padding(.horizontal, 9).frame(height: 22)
         .background(.quaternary.opacity(0.6), in: Capsule())
-        .help("What the agent may do without asking. Applies from the next message.")
-        .accessibilityLabel("Permissions: \(conversation.permissionLevel.label)")
-    }
-
-    private var icon: String {
-        switch conversation.permissionLevel {
-        case .readOnly: "lock"
-        case .ask: "hand.raised"
-        case .acceptEdits: "pencil"
-        }
+        .help(help)
+        .accessibilityLabel("Permissions: \(level.label)")
     }
 }
 

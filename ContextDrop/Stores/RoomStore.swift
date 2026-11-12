@@ -40,6 +40,7 @@ final class RoomStore {
     @ObservationIgnored private let service: RoomService
     @ObservationIgnored private(set) lazy var engine = RoomChatEngine(store: self)
     @ObservationIgnored private(set) lazy var runs = RoomRunBroadcaster(store: self)
+    @ObservationIgnored private(set) lazy var inbox = RoomRunInbox(store: self)
     @ObservationIgnored private var joiningRoomID: UUID?
     @ObservationIgnored private var pendingMoves: [UUID: RoomMessage] = [:]
     @ObservationIgnored private var lastMoveSent: [UUID: Date] = [:]
@@ -176,6 +177,7 @@ final class RoomStore {
     private func stopWork() {
         engine.reset()
         runs.reset()
+        inbox.reset()
         moveFlush?.cancel()
         moveFlush = nil
         pendingMoves = [:]
@@ -402,29 +404,12 @@ final class RoomStore {
             notice = "\(chat.ownerName) left the room, so this chat can’t take new files."
             return
         }
-        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
-        guard values?.isDirectory != true, let size = values?.fileSize else {
-            notice = "“\(name)” isn’t a file that can be added. Folders can’t go in a chat."
-            return
-        }
-        guard size <= RoomLimits.maxFileBytes else {
-            notice = "“\(name)” is larger than 20 MB, so it wasn’t added."
-            return
-        }
         guard chat.files.count < RoomLimits.maxFilesPerChat else {
             notice = "This chat already holds \(RoomLimits.maxFilesPerChat) files. Remove one to add another."
             return
         }
         // Copy now: sending is asynchronous and the original may move.
-        let copy = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ctxdrop-room-\(UUID().uuidString)").appendingPathExtension(url.pathExtension)
-        guard (try? FileManager.default.copyItem(at: url, to: copy)) != nil else {
-            notice = "“\(name)” couldn’t be read."
-            return
-        }
-        let kind = RoomFile.Kind.of(url)
-        let file = RoomFile(id: UUID(), name: name, kind: kind, size: size, addedBy: localName,
-                            thumbnail: kind == .image ? RoomFile.thumbnail(url) : nil, status: .sending)
+        guard let (file, copy) = prepareFile(url, name: name) else { return }
         guard post(.addFile(tileID, file)) else {
             try? FileManager.default.removeItem(at: copy)
             return
@@ -463,24 +448,37 @@ final class RoomStore {
         service.sendFile(url, name: Self.resourceName(tileID, fileID), toMember: chat.ownerName) { _ in }
     }
 
-    /// File bytes arrived: for a chat this Mac owns, or (on the host) to pass on to the chat's owner.
+    /// File bytes arrived: for a chat or a run this Mac owns, or (on the host) to pass on to the tile's owner.
     private func fileArrived(_ url: URL, name: String) {
         let parts = name.split(separator: "|")
         guard isActive, parts.count == 2, let tileID = UUID(uuidString: String(parts[0])), let fileID = UUID(uuidString: String(parts[1])),
-              let chat = tile(tileID)?.chat, let file = chat.files.first(where: { $0.id == fileID }), file.status == .sending else {
+              let tile = tile(tileID), Self.sendingFile(fileID, in: tile) else {
             try? FileManager.default.removeItem(at: url)
             return
         }
-        if chat.ownerName == localName {
-            engine.ingest(url, tileID: tileID, fileID: fileID)
+        if tile.ownerName == localName {
+            if tile.run != nil {
+                inbox.ingest(url, tileID: tileID, fileID: fileID)
+            } else {
+                engine.ingest(url, tileID: tileID, fileID: fileID)
+            }
         } else if isHost {
-            service.sendFile(url, name: name, toMember: chat.ownerName) { _ in try? FileManager.default.removeItem(at: url) }
+            service.sendFile(url, name: name, toMember: tile.ownerName) { _ in try? FileManager.default.removeItem(at: url) }
         } else {
             try? FileManager.default.removeItem(at: url)
         }
     }
 
-    // MARK: Claude Code runs
+    /// The tile (a chat, or a follow-up on a run) has this file and is still waiting for its bytes.
+    private static func sendingFile(_ fileID: UUID, in tile: RoomTile) -> Bool {
+        switch tile.content {
+        case .chat(let chat): chat.files.contains { $0.id == fileID && $0.status == .sending }
+        case .run(let run): run.requests.contains { $0.status == .pending && $0.files.contains { $0.id == fileID && $0.status == .sending } }
+        case .card: false
+        }
+    }
+
+    // MARK: Claude Code and Codex runs
 
     /// Gives a chat a run's plan, status and changed files as context ("how far along is it?").
     func attachRun(_ runID: UUID, to chatID: UUID) {
@@ -500,7 +498,131 @@ final class RoomStore {
         post(.runNote(tileID, RunNote(id: UUID(), from: localName, text: trimmed)))
     }
 
-    /// Puts one of this Mac's Claude Code chats in the room as a live, watch-only tile.
+    /// Whether this Mac can send a follow-up to a run tile now, and if not, why.
+    func continueBlocker(_ tileID: UUID) -> String? {
+        guard isActive, let run = tile(tileID)?.run else { return "The room has ended." }
+        guard isPresent(run.ownerName) else { return "\(run.ownerName) left the room, so this run can’t be continued here." }
+        if run.pendingRequests.count >= RoomLimits.maxRunRequests {
+            return run.ownerName == localName
+                ? "Run or dismiss the follow-ups waiting on this tile first."
+                : "\(run.ownerName) has \(RoomLimits.maxRunRequests) follow-ups waiting. Try again once they’ve answered some."
+        }
+        if run.ownerName == localName { return inbox.blocker(for: tileID) }
+        if run.pendingRequests.contains(where: { $0.from == localName }) {
+            return "\(run.ownerName) hasn’t answered your last follow-up yet."
+        }
+        return nil
+    }
+
+    /// Continues a run from the room: a follow-up prompt with files, run in the same session on the owner's Mac.
+    /// The owner's own follow-up runs at once; anyone else's waits on the tile until the owner runs or dismisses it.
+    /// The file bytes go only to the owner's Mac.
+    @discardableResult
+    func continueRun(_ text: String, files urls: [URL], in tileID: UUID) -> Bool {
+        let trimmed = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(RoomLimits.maxQuestionLength))
+        guard !trimmed.isEmpty || !urls.isEmpty, let run = tile(tileID)?.run else { return false }
+        if let blocker = continueBlocker(tileID) {
+            notice = blocker
+            return false
+        }
+        // Copy each file now: sending is asynchronous and the original may move.
+        let files = urls.prefix(RoomLimits.maxFilesPerRequest).compactMap { prepareFile($0) }
+        if urls.count > RoomLimits.maxFilesPerRequest {
+            notice = "A follow-up takes up to \(RoomLimits.maxFilesPerRequest) files; the rest were left out."
+        }
+        guard !trimmed.isEmpty || !files.isEmpty else { return false }
+        return run.ownerName == localName
+            ? continueOwnRun(trimmed, files: files, in: tileID)
+            : askToContinue(trimmed, files: files, in: tileID, owner: run.ownerName)
+    }
+
+    /// The owner's own follow-up: its files are kept here and it runs at once.
+    private func continueOwnRun(_ text: String, files prepared: [PreparedFile], in tileID: UUID) -> Bool {
+        let files = prepared.map { item in
+            var file = item.file
+            let kept = inbox.keep(item.copy, fileID: file.id, name: file.name, tileID: tileID)
+            file.status = kept ? .ready : .failed("It couldn’t be saved on your Mac.")
+            return file
+        }
+        let request = RunRequest(id: UUID(), from: localName, text: text, files: files, status: .accepted)
+        guard post(.runRequest(tileID, request)) else {
+            inbox.discard(request)
+            return false
+        }
+        inbox.run(request, in: tileID)
+        return true
+    }
+
+    /// Someone else's run: the follow-up waits on the tile, and its files go to the owner's Mac.
+    private func askToContinue(_ text: String, files prepared: [PreparedFile], in tileID: UUID, owner: String) -> Bool {
+        let request = RunRequest(id: UUID(), from: localName, text: text, files: prepared.map(\.file), status: .pending)
+        guard post(.runRequest(tileID, request)) else {
+            for item in prepared { try? FileManager.default.removeItem(at: item.copy) }
+            return false
+        }
+        for (file, copy) in prepared {
+            service.sendFile(copy, name: Self.resourceName(tileID, file.id), toMember: owner) { [weak self] sent in
+                try? FileManager.default.removeItem(at: copy)
+                guard let self, !sent else { return }
+                self.notice = "“\(file.name)” couldn’t be sent to \(owner)’s Mac."
+            }
+        }
+        return true
+    }
+
+    /// The owner runs someone's follow-up in the run's own session. Files that never arrived are left out.
+    func acceptRunRequest(_ requestID: UUID, in tileID: UUID) {
+        guard let run = tile(tileID)?.run, run.ownerName == localName,
+              let request = run.requests.first(where: { $0.id == requestID }), request.status == .pending else { return }
+        if let blocker = inbox.blocker(for: tileID) {
+            notice = blocker
+            return
+        }
+        guard request.filesSettled else {
+            notice = "\(request.from)’s files are still on their way."
+            return
+        }
+        guard post(.runRequestStatus(tileID, requestID: requestID, .accepted)) else { return }
+        inbox.run(request, in: tileID)
+    }
+
+    /// The owner says no to a follow-up. Its files are deleted from this Mac.
+    func dismissRunRequest(_ requestID: UUID, in tileID: UUID) {
+        guard let run = tile(tileID)?.run, run.ownerName == localName,
+              let request = run.requests.first(where: { $0.id == requestID }), request.status == .pending else { return }
+        guard post(.runRequestStatus(tileID, requestID: requestID, .dismissed)) else { return }
+        inbox.discard(request)
+    }
+
+    /// A file checked and copied for the room, and the temporary copy that holds its bytes.
+    private typealias PreparedFile = (file: RoomFile, copy: URL)
+
+    /// Checks a file someone wants to add (to a chat or a follow-up) and copies it somewhere it can't move.
+    /// Nil, with a notice, when it can't go. `name` is what the room sees; the file's own name by default.
+    private func prepareFile(_ url: URL, name: String? = nil) -> PreparedFile? {
+        let name = name ?? url.lastPathComponent
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+        guard values?.isDirectory != true, let size = values?.fileSize else {
+            notice = "“\(name)” isn’t a file that can be added. Folders can’t be sent."
+            return nil
+        }
+        guard size <= RoomLimits.maxFileBytes else {
+            notice = "“\(name)” is larger than 20 MB, so it wasn’t added."
+            return nil
+        }
+        let copy = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctxdrop-room-\(UUID().uuidString)").appendingPathExtension(url.pathExtension)
+        guard (try? FileManager.default.copyItem(at: url, to: copy)) != nil else {
+            notice = "“\(name)” couldn’t be read."
+            return nil
+        }
+        let kind = RoomFile.Kind.of(url)
+        let file = RoomFile(id: UUID(), name: name, kind: kind, size: size, addedBy: localName,
+                            thumbnail: kind == .image ? RoomFile.thumbnail(url) : nil, status: .sending)
+        return (file, copy)
+    }
+
+    /// Puts one of this Mac's Claude Code or Codex chats in the room as a live tile that people can continue.
     @discardableResult
     func shareRun(_ conversation: Conversation) -> UUID? {
         guard isActive else { return nil }
@@ -669,11 +791,23 @@ final class RoomStore {
         case .removeTile(let id):
             engine.tileRemoved(id)
             runs.tileRemoved(id)
+            inbox.tileRemoved(id)
             runLogs[id] = nil
             chatDrafts[id] = nil
         case .runNote(let id, let note):
             guard let run = tile(id)?.run, run.ownerName == localName, note.from != localName else { return }
             notice = "\(note.from) about “\(run.title)”: \(note.text)"
+        case .runRequest(let id, let request):
+            guard let run = tile(id)?.run, run.ownerName == localName, request.from != localName else { return }
+            inbox.expectFiles(of: request, in: id)
+            let files = request.files.isEmpty ? "" : " with \(request.files.count) file\(request.files.count == 1 ? "" : "s")"
+            notice = "\(request.from) wants to continue “\(run.title)”\(files). Run or dismiss it on the tile."
+        case .runRequestStatus(let id, let requestID, let status):
+            guard let run = tile(id)?.run, run.ownerName != localName,
+                  run.requests.first(where: { $0.id == requestID })?.from == localName else { return }
+            notice = status == .accepted
+                ? "\(run.ownerName) ran your follow-up on “\(run.title)”."
+                : "\(run.ownerName) dismissed your follow-up on “\(run.title)”."
         default:
             break
         }

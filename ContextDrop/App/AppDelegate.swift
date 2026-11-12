@@ -244,19 +244,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         notices.text = "Added to the room. The rest of this chat stays private."
     }
 
-    /// "To room" on a tab: a Claude Code chat becomes a live, watch-only run tile; an OpenAI chat becomes a
-    /// chat tile everyone can reply in. Either way it keeps running on this Mac.
+    /// "To room" on a tab: a Claude Code or Codex chat becomes a live run tile that people can follow and send
+    /// follow-ups to (each waits for your OK); an OpenAI chat becomes a chat tile everyone can reply in.
+    /// Either way it keeps running on this Mac.
     private func sendTabToRoom(_ conversation: Conversation) {
         guard roomStore.isActive else { return }
         switch conversation.provider.roomShare {
         case .liveRun:
             guard roomStore.shareRun(conversation) != nil else { return }
-            notices.text = "This run is in the room. Others can watch; only you approve edits or stop it. Secrets in the log are hidden."
+            notices.text = "This run is in the room. Others can watch and ask to continue it; nothing they send runs until you OK it. Secrets in the log are hidden."
         case .chatCopy:
             guard roomStore.shareChat(conversation) != nil else { return }
             notices.text = "This chat is in the room as a copy. Anyone there can reply; it answers from your Mac."
         case .none:
-            notices.text = "Only Claude Code runs and OpenAI chats can go in a room for now."
+            notices.text = "This chat can’t go in a room."
             return
         }
         roomWindow.show()

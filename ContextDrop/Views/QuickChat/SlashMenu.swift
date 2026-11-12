@@ -183,7 +183,7 @@ struct RouteCaption: View {
     }
 
     private var text: String {
-        if decision.fellBack { return "Auto unavailable · used OpenAI" }
+        if decision.fellBack { return "Auto unavailable · used \(decision.provider.displayName)" }
         var parts = ["Auto → \(decision.provider.displayName)"]
         if decision.provider.isDeep, let folder = conversation.folder { parts.append(FolderDrop.display(folder)) }
         if !decision.reason.isEmpty { parts.append(decision.reason) }

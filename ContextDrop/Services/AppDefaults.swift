@@ -43,10 +43,36 @@ enum AppDefaults {
     static let autoRouteKey = "ContextDrop.autoRoute"
     static let lastFolderKey = "ContextDrop.lastFolder"
 
-    /// Auto mode: the OpenAI Decisions API decides quick answer vs. Claude Code for a new chat's first question.
+    /// Auto mode: the OpenAI Decisions API decides quick answer vs. a coding CLI for a new chat's first question.
     static var autoRoute: Bool {
         get { UserDefaults.standard.object(forKey: autoRouteKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: autoRouteKey) }
+    }
+
+    static let preferredCLIKey = "ContextDrop.preferredCLI"
+    static let routeCLIByTaskKey = "ContextDrop.routeCLIByTask"
+    static let cliWorkPreferencesKey = "ContextDrop.cliWorkPreferences"
+
+    /// Independent of the last manually selected chat provider; preserve the old preference on upgrade.
+    static var preferredCLI: ProviderKind {
+        get {
+            let saved = UserDefaults.standard.string(forKey: preferredCLIKey).flatMap(ProviderKind.init(rawValue:))
+            if let saved, saved.isDeep { return saved }
+            let initial: ProviderKind = provider.isDeep ? provider : .claudeCode
+            UserDefaults.standard.set(initial.rawValue, forKey: preferredCLIKey)
+            return initial
+        }
+        set { if newValue.isDeep { UserDefaults.standard.set(newValue.rawValue, forKey: preferredCLIKey) } }
+    }
+
+    static var routeCLIByTask: Bool {
+        get { UserDefaults.standard.bool(forKey: routeCLIByTaskKey) }
+        set { UserDefaults.standard.set(newValue, forKey: routeCLIByTaskKey) }
+    }
+
+    static var cliWorkPreferences: String {
+        get { UserDefaults.standard.string(forKey: cliWorkPreferencesKey) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: cliWorkPreferencesKey) }
     }
 
     static let delegateKey = "ContextDrop.delegateAgents"
