@@ -96,6 +96,7 @@ struct ChatView: View {
                 HStack(spacing: 8) {
                     FolderChip(model: model, conversation: conversation)
                     PermissionLevelMenu(store: store, conversation: conversation)
+                    RoomShareChip(model: model, conversation: conversation)
                     Spacer(minLength: 4)
                     if !model.showTerminal {
                         Button { model.toggleTerminal() } label: {
