@@ -33,7 +33,7 @@ struct PanelActions {
     var openRoom: () -> Void = {}
     /// "To room": puts an answer on the table of the room you're in.
     var sendToRoom: (Message, Conversation) -> Void = { _, _ in }
-    /// "To room" on a whole tab: a Claude Code run becomes a run tile, an OpenAI chat a chat tile.
+    /// "To room" on an OpenAI tab: the chat becomes a chat tile. (A run tab has the room chip instead.)
     var sendTabToRoom: (Conversation) -> Void = { _ in }
     /// The room chip: put a run in the room at a level, take it out, or change its level (by conversation id).
     var shareRun: (Conversation, RunShareLevel) -> Void = { _, _ in }
@@ -123,12 +123,9 @@ final class PanelModel {
 
     /// What the panel asks the app to do (wired by the AppDelegate and the panel's controller).
     @ObservationIgnored var actions = PanelActions()
-    /// Whether "To room" is offered (you're in a live room).
-    var roomActive = false
-    /// The room you're in, for the room chip: its name, how many are here, and which of your runs are in it.
-    var roomName: String?
-    var roomPeople = 0
-    var roomRuns: [UUID: RunShareLevel] = [:]
+    /// The room you're in, for "To room" and the room chip. Nil when you aren't in one.
+    var room: PanelRoom?
+    var roomActive: Bool { room != nil }
     /// The level a run was last put in the room at; ⌘⇧R shares the next one the same way.
     var lastShareLevel: RunShareLevel = .steps
 
@@ -420,7 +417,7 @@ final class PanelModel {
     func sendFocusedToRoom(in id: UUID) {
         guard roomActive, let conversation = store.conversation(id) else { return }
         if conversation.provider.roomShare == .liveRun {
-            if roomRuns[id] != nil {
+            if room?.runs[id] != nil {
                 actions.openRoom()
             } else {
                 actions.shareRun(conversation, lastShareLevel)
@@ -512,4 +509,12 @@ final class PanelModel {
         session(id).draft = ""
         store.ask(question, in: id)
     }
+}
+
+/// What the panel shows of the room you're in.
+struct PanelRoom: Equatable {
+    var name: String
+    var people: Int
+    /// Which of your runs are in it (by conversation id), and how much of each is shown.
+    var runs: [UUID: RunShareLevel]
 }

@@ -88,10 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         roomStore.chats = store
         roomStore.onChange = { [weak self] in
             guard let self else { return }
-            self.panelModel.roomActive = self.roomStore.isActive
-            self.panelModel.roomName = self.roomStore.isActive ? self.roomStore.room?.name : nil
-            self.panelModel.roomPeople = self.roomStore.presentCount
-            self.panelModel.roomRuns = self.roomStore.sharedRuns
+            self.refreshPanelRoom()
             self.roomWindow.roomChanged()
             self.menuBar.refresh()
         }
@@ -239,8 +236,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             roomStore.openRoom()
             roomStore.inviteAllNearby()
         }
-        panelModel.roomActive = roomStore.isActive
+        refreshPanelRoom()
         roomWindow.show()
+    }
+
+    private func refreshPanelRoom() {
+        let room = roomStore.isActive
+            ? PanelRoom(name: roomStore.room?.name ?? "Room", people: roomStore.presentCount, runs: roomStore.sharedRuns)
+            : nil
+        if panelModel.room != room { panelModel.room = room }
     }
 
     /// "To room" on an answer: only this answer goes in the room; the chat it came from stays private.
@@ -250,43 +254,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         notices.text = "Added to the room. The rest of this chat stays private."
     }
 
-    /// "To room" on a tab: a Claude Code or Codex chat becomes a live run tile that people can follow and send
-    /// follow-ups to (each waits for your OK); an OpenAI chat becomes a chat tile everyone can reply in.
-    /// Either way it keeps running on this Mac.
+    /// "To room" on an OpenAI tab: the chat becomes a chat tile everyone can reply in. It keeps answering from
+    /// this Mac. (Claude Code and Codex tabs go in through the room chip, `shareRun`.)
     private func sendTabToRoom(_ conversation: Conversation) {
-        guard roomStore.isActive else { return }
-        switch conversation.provider.roomShare {
-        case .liveRun:
-            // A run already in the room keeps its level.
-            guard shareRun(conversation, level: roomStore.sharedRuns[conversation.id] ?? .steps) else { return }
-        case .chatCopy:
-            guard roomStore.shareChat(conversation) != nil else { return }
-            notices.text = "This chat is in the room as a copy. Anyone there can reply; it answers from your Mac."
-        case .none:
-            notices.text = "This chat can’t go in a room."
-            return
-        }
+        guard roomStore.isActive, conversation.provider.roomShare == .chatCopy,
+              roomStore.shareChat(conversation) != nil else { return }
+        notices.text = "This chat is in the room as a copy. Anyone there can reply; it answers from your Mac."
         roomWindow.show()
     }
 
-    /// The room chip (and ⌘⇧R on a run tab): puts a run in the room at `level`, or changes its level if it is
-    /// already there. The room window stays shut, since this is used from Quick Chat. True if the run is in the room.
-    @discardableResult
-    private func shareRun(_ conversation: Conversation, level: RunShareLevel) -> Bool {
-        guard roomStore.isActive, conversation.provider.roomShare == .liveRun else { return false }
-        let previous = roomStore.sharedRuns[conversation.id]
-        guard roomStore.shareRun(conversation, level: level) != nil else { return false }
-        panelModel.lastShareLevel = level
-        if previous == level {
+    /// The room chip (and ⌘⇧R on a run tab): puts a run in the room at `level`. A run already there keeps its
+    /// level. The room window stays shut, since this is used from Quick Chat.
+    private func shareRun(_ conversation: Conversation, level: RunShareLevel) {
+        guard roomStore.isActive, conversation.provider.roomShare == .liveRun else { return }
+        if roomStore.sharedRuns[conversation.id] != nil {
             notices.text = "This run is already in the room."
-        } else if previous != nil {
-            notices.text = Self.levelNotice(level)
-        } else {
-            notices.text = level == .withLog
-                ? "This run is in the room with its log. Others can ask to continue it; nothing they send runs until you OK it. Secrets in the log are hidden."
-                : "This run is in the room: its steps and changed files. Others can ask to continue it; nothing they send runs until you OK it."
+            return
         }
-        return true
+        guard roomStore.shareRun(conversation, level: level) != nil else { return }
+        panelModel.lastShareLevel = level
+        notices.text = level == .withLog
+            ? "This run is in the room with its log. Others can ask to continue it; nothing they send runs until you OK it. Secrets in the log are hidden."
+            : "This run is in the room: its steps and changed files. Others can ask to continue it; nothing they send runs until you OK it."
     }
 
     /// "Take out of room" on the chip: the tile goes for everyone; the run carries on here.

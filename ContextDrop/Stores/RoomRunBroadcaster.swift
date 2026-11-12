@@ -12,16 +12,13 @@ final class RoomRunBroadcaster {
     private struct Tracked {
         var conversationID: UUID
         /// How much of the run the room sees. Kept here only.
-        var level: RunShareLevel = .steps
-        /// The last summary sent, after `level` was applied.
+        var level: RunShareLevel
+        /// The last summary sent.
         var last: RoomRunTile?
-        /// Log lines already numbered for the room, newest last. Kept at every level, so turning the log on
-        /// later carries on the same numbering and watchers stitch it to what they saw before.
+        /// Log lines for the room, newest last: only those read while the log is shown. Numbering carries on
+        /// across a level change, so watchers stitch the log to what they saw before.
         var log: [RunLogLine] = []
         var nextSeq = 0
-        /// The first log line the room may see: lines numbered while the log was private stay private when the
-        /// owner turns it on later.
-        var logFrom = 0
         var lastLineID: UUID?
         /// The previous command read a .env file, so its output is all values.
         var envOutput = false
@@ -42,8 +39,14 @@ final class RoomRunBroadcaster {
 
     func conversationID(for tileID: UUID) -> UUID? { tracked[tileID]?.conversationID }
 
-    func track(_ conversationID: UUID, as tileID: UUID, level: RunShareLevel = .steps) {
+    /// This Mac's runs in the room (by conversation id) and how much of each is shown.
+    var levels: [UUID: RunShareLevel] {
+        Dictionary(tracked.values.map { ($0.conversationID, $0.level) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    func track(_ conversationID: UUID, as tileID: UUID, level: RunShareLevel) {
         tracked[tileID] = Tracked(conversationID: conversationID, level: level)
+        store.onChange?()
         tick()
         guard loop == nil else { return }
         loop = Task { [weak self] in
@@ -59,15 +62,18 @@ final class RoomRunBroadcaster {
     func setLevel(_ level: RunShareLevel, forConversation conversationID: UUID) {
         guard let tileID = tileID(for: conversationID), var entry = tracked[tileID], entry.level != level else { return }
         entry.level = level
-        // Turned on mid-run: show what happens from now, not what was printed while it was private.
-        if level == .withLog { entry.logFrom = entry.nextSeq }
+        // Lines are only read for the room while the log is shown, so turning it on mid-run shows what happens
+        // from now, not what was printed while it was private.
+        if level == .steps { entry.log = [] }
         tracked[tileID] = entry
+        store.onChange?()
         tick()
     }
 
     func tileRemoved(_ id: UUID) {
-        tracked[id] = nil
+        guard tracked.removeValue(forKey: id) != nil else { return }
         if tracked.isEmpty { stop() }
+        store.onChange?()
     }
 
     func reset() {
@@ -84,10 +90,7 @@ final class RoomRunBroadcaster {
         guard store.isActive else { return }
         for tileID in Array(tracked.keys) {
             guard var entry = tracked[tileID] else { continue }
-            guard let built = build(&entry) else { continue }
-            var run = Self.applying(entry.level, to: built)
-            let from = entry.logFrom
-            run.log.removeAll { $0.seq < from }
+            guard let run = build(&entry) else { continue }
             if run != entry.last {
                 entry.last = run
                 store.post(.runUpdate(tileID, run))
@@ -97,17 +100,9 @@ final class RoomRunBroadcaster {
     }
 
     /// The first summary of a run, before it has a tile, showing as much as `level` allows.
-    func snapshot(of conversationID: UUID, level: RunShareLevel = .steps) -> RoomRunTile? {
+    func snapshot(of conversationID: UUID, level: RunShareLevel) -> RoomRunTile? {
         var entry = Tracked(conversationID: conversationID, level: level)
-        return build(&entry).map { Self.applying(level, to: $0) }
-    }
-
-    /// What the room sees of a run at a level: without the log for `.steps`, everything for `.withLog`.
-    nonisolated static func applying(_ level: RunShareLevel, to run: RoomRunTile) -> RoomRunTile {
-        guard level == .steps else { return run }
-        var run = run
-        run.log = []
-        return run
+        return build(&entry)
     }
 
     // MARK: Summary
@@ -178,12 +173,13 @@ final class RoomRunBroadcaster {
         }
         run.changes = changes
 
-        // New log lines since the last look, masked before they are numbered.
+        // New log lines since the last look, masked before they are numbered. They are still read while the log
+        // is private, only to follow whether output comes from a .env file.
         let lines = terminal.lines
         var start = 0
         if let last = entry.lastLineID, let i = lines.lastIndex(where: { $0.id == last }) { start = i + 1 }
         for line in lines[start...] {
-            guard let text = logText(line, envOutput: &entry.envOutput) else { continue }
+            guard let text = logText(line, keep: entry.level == .withLog, envOutput: &entry.envOutput) else { continue }
             entry.log.append(RunLogLine(seq: entry.nextSeq, text: text))
             entry.nextSeq += 1
         }
@@ -194,8 +190,9 @@ final class RoomRunBroadcaster {
         return run.masked().sanitized()
     }
 
-    /// One short, masked line for the room, or nil for lines that stay here (thinking, raw output noise).
-    private func logText(_ line: TerminalLine, envOutput: inout Bool) -> String? {
+    /// One short, masked line for the room, or nil for lines that stay here (thinking, raw output noise, and
+    /// every line when `keep` is false).
+    private func logText(_ line: TerminalLine, keep: Bool, envOutput: inout Bool) -> String? {
         let first = String(line.text.prefix(while: { !$0.isNewline }))
         guard !first.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         let prefix: String
@@ -215,6 +212,7 @@ final class RoomRunBroadcaster {
         case .error:
             prefix = "! "
         }
+        guard keep else { return nil }
         let isOutput = line.kind == .output || line.kind == .result || line.kind == .stderr
         let masked = SecretMasker.mask(first, envFile: isOutput && envOutput)
         return String((prefix + masked).prefix(RoomLimits.maxLogLineLength))

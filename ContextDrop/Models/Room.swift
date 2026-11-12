@@ -4,6 +4,8 @@ import Foundation
 /// Hard limits for everything in a room. Applied to local input and to everything decoded from the network.
 enum RoomLimits {
     static let maxTextLength = 8_000
+    /// The most text from selected tiles that a chat or run spawned from them starts with.
+    static let maxContextLength = 3 * maxTextLength
     static let maxTiles = 300
     static let maxMembers = 16
     static let maxNameLength = 63
@@ -408,6 +410,19 @@ struct RoomTile: Codable, Sendable, Equatable, Identifiable {
         case .card(let body): body.kind.label.lowercased()
         case .chat(let chat): chat.title.isEmpty ? "chat" : String(chat.title.prefix(24))
         case .run(let run): run.title.isEmpty ? "run" : String(run.title.prefix(24))
+        }
+    }
+
+    /// What kind of tile it is and who is behind it, heading the tile in a model's context,
+    /// e.g. "Note by Bob" or "Chat “Pricing”, run by Alice".
+    var contextLabel: String {
+        switch content {
+        case .card(let body):
+            "\(body.kind.label) by \(addedBy)"
+        case .chat(let chat):
+            "Chat “\(chat.title.isEmpty ? RoomReducer.untitledChat : String(chat.title.prefix(RoomLimits.maxTitleLength)))”, run by \(chat.ownerName)"
+        case .run(let run):
+            "\(run.agent) run, by \(run.ownerName)"
         }
     }
 

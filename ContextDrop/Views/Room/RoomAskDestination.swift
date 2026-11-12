@@ -66,8 +66,7 @@ struct RoomAskDestinationMenu: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .padding(.horizontal, 9).frame(height: 22)
-        .background(.quaternary.opacity(0.6), in: Capsule())
+        .chipCapsule()
         .help("Choose what typing here does: start a chat, or start a run on your Mac.")
         .accessibilityLabel("To: \(destination.title(selected: selectedCount))")
     }
@@ -94,14 +93,10 @@ struct RoomAskBadge: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(acts ? "ACTS" : "TALKS")
-                .font(.system(size: 9.5, weight: .bold))
-                .kerning(0.6)
-                .foregroundStyle(color)
+            RoomKindLabel(text: acts ? "Acts" : "Talks", color: color)
                 .padding(.horizontal, 6)
                 .frame(height: 17)
                 .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                .fixedSize()
             Text(detail)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -129,13 +124,21 @@ struct RoomRunFolderChip: View {
                     .frame(maxWidth: 170)
             }
             .font(.system(size: 12))
-            .padding(.horizontal, 9).frame(height: 22)
-            .background(.quaternary.opacity(0.6), in: Capsule())
+            .chipCapsule()
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .fixedSize()
         .help("The project folder the run works in. Click to choose another.")
         .accessibilityLabel(folder.map { "Folder: \(FolderDrop.display($0)). Choose another" } ?? "Choose a folder")
+    }
+}
+
+extension View {
+    /// The capsule a chip in an ask bar or chat header sits in: grey, or tinted with `tint` when it shows a state.
+    func chipCapsule(tint: Color? = nil) -> some View {
+        padding(.horizontal, 9)
+            .frame(height: 22)
+            .background(tint.map { AnyShapeStyle($0.opacity(0.14)) } ?? AnyShapeStyle(.quaternary.opacity(0.6)), in: Capsule())
     }
 }

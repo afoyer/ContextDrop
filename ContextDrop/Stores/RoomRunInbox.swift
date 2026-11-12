@@ -38,6 +38,11 @@ final class RoomRunInbox {
         return dir.appendingPathComponent(safe.isEmpty || safe.hasPrefix(".") ? "file" + safe : safe)
     }
 
+    /// A room file handed to an agent: images go as images, everything else as a file the agent reads itself.
+    static func attachment(id: UUID, at url: URL, name: String) -> Attachment {
+        Attachment(id: id, path: url.path, name: name, isReference: Attachments.isImage(url) ? nil : true)
+    }
+
     /// Keeps a file for a follow-up on a run this Mac owns (`url` is a temporary copy this takes over).
     /// Returns false when it couldn't be kept.
     @discardableResult
@@ -101,8 +106,7 @@ final class RoomRunInbox {
         for file in request.files where file.status == .ready {
             guard let held = localFiles[file.id], held.tileID == tileID else { continue }
             localFiles[file.id] = nil
-            attachments.append(Attachment(id: file.id, path: held.url.path, name: file.name,
-                                          isReference: Attachments.isImage(held.url) ? nil : true))
+            attachments.append(Self.attachment(id: file.id, at: held.url, name: file.name))
         }
         chats.ask(Self.prompt(request, me: me, attachments: attachments), attachments: attachments,
                   levelCap: Self.levelCap(for: request, me: me), in: conversationID)

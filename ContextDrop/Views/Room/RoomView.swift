@@ -24,7 +24,8 @@ struct RoomView: View {
     @State private var typingTiles: Set<UUID> = []
     /// Where the ask bar sends what is typed. Kept while this window is open.
     @State private var askDestination: RoomAskDestination = .chat
-    /// A folder chosen in the ask bar for runs; nil uses the last folder a coding agent worked in.
+    /// The folder runs from the ask bar work in: the last folder a coding agent worked in until another is chosen.
+    /// Looked up when a run is first chosen as the destination.
     @State private var runFolder: URL?
     /// A level chosen in the ask bar for runs; nil uses the default from Settings › Providers.
     @State private var runLevel: PermissionLevel?
@@ -467,8 +468,8 @@ struct RoomView: View {
         let tiles = selectedTiles
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         let providers = RoomAskDestination.runProviders(store.chats)
-        let runProvider = activeRunProvider(providers)
-        let destination: RoomAskDestination = runProvider.map { .run($0) } ?? .chat
+        let destination = currentDestination(providers)
+        let runProvider = destination.provider
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Text("To")
@@ -478,9 +479,10 @@ struct RoomView: View {
                     .accessibilityHidden(true)
                 RoomAskDestinationMenu(destination: destination, selectedCount: tiles.count, providers: providers) {
                     askDestination = $0
+                    if $0.provider != nil, runFolder == nil { runFolder = AppDefaults.lastFolder ?? AppDefaults.folder }
                 }
                 if runProvider != nil {
-                    RoomRunFolderChip(folder: runFolderOrDefault) { _ = chooseRunFolder() }
+                    RoomRunFolderChip(folder: runFolder) { _ = chooseRunFolder() }
                     PermissionLevelMenu(level: runLevelOrDefault, compact: true,
                                         help: "What the run may do on your Mac without asking you.") { runLevel = $0 }
                 }
@@ -513,9 +515,7 @@ struct RoomView: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
                     .focused($askFocused)
-                    .onSubmit {
-                        if let runProvider { startRun(runProvider) } else { spawn(question: question, from: selection) }
-                    }
+                    .onSubmit { submit(to: destination) }
                 if let runProvider {
                     Button {
                         startRun(runProvider)
@@ -568,18 +568,23 @@ struct RoomView: View {
         show(id)
     }
 
-    /// The run provider the ask bar is set to, if it can still start one here.
-    private func activeRunProvider(_ providers: [(kind: ProviderKind, status: ProviderStatus)]) -> ProviderKind? {
-        guard let provider = askDestination.provider else { return nil }
-        return providers.contains { $0.kind == provider && $0.status.isReady } ? provider : nil
+    /// Where the ask bar sends what is typed: the chosen run while its provider can still start one here,
+    /// otherwise a new chat.
+    private func currentDestination(_ providers: [(kind: ProviderKind, status: ProviderStatus)]) -> RoomAskDestination {
+        guard let provider = askDestination.provider,
+              providers.contains(where: { $0.kind == provider && $0.status.isReady }) else { return .chat }
+        return askDestination
+    }
+
+    /// Return in the ask bar.
+    private func submit(to destination: RoomAskDestination) {
+        if let provider = destination.provider { startRun(provider) } else { spawn(question: question, from: selection) }
     }
 
     private func selectionHint(empty: Bool, run: Bool) -> String {
         if run { return empty ? "Select chats or cards to give the run context" : "The run starts from what you selected" }
         return empty ? "Everyone can see chats started here" : "The new chat starts from what you selected"
     }
-
-    private var runFolderOrDefault: URL? { runFolder ?? AppDefaults.lastFolder ?? AppDefaults.folder }
 
     private var runLevelOrDefault: PermissionLevel { runLevel ?? AppDefaults.permissionLevel }
 
@@ -594,7 +599,7 @@ struct RoomView: View {
     private func startRun(_ provider: ProviderKind) {
         guard store.isActive else { return }
         let prompt = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, let folder = runFolderOrDefault ?? chooseRunFolder() else { return }
+        guard !prompt.isEmpty, let folder = runFolder ?? chooseRunFolder() else { return }
         guard let id = store.startRun(provider: provider, prompt: prompt, selected: selection,
                                       folder: folder, level: runLevelOrDefault) else { return }
         question = ""

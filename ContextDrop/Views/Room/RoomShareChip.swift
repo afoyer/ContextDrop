@@ -25,11 +25,11 @@ struct RoomShareChip: View {
         conversation.messages.last(where: { $0.role == .assistant && $0.error == nil && !$0.text.isEmpty })
     }
 
-    private var peopleHere: String { "\(model.roomPeople) here" }
+    private var peopleHere: String { "\(model.room?.people ?? 0) here" }
 
     var body: some View {
         if visible {
-            if let level = model.roomRuns[conversation.id] {
+            if let level = model.room?.runs[conversation.id] {
                 sharedMenu(level)
             } else {
                 shareButton
@@ -54,8 +54,7 @@ struct RoomShareChip: View {
         .buttonStyle(.borderless)
         .foregroundStyle(.primary)
         .fixedSize()
-        .padding(.horizontal, 9).frame(height: 22)
-        .background(.quaternary.opacity(0.6), in: Capsule())
+        .chipCapsule()
         .help("Put this run in the room. You choose how much others see.")
         .accessibilityLabel("Put in room")
         .popover(isPresented: $choosing, arrowEdge: .bottom) { sharePopover }
@@ -65,7 +64,7 @@ struct RoomShareChip: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Image(systemName: "square.grid.2x2").foregroundStyle(.secondary)
-                Text("\(model.roomName ?? "Room") · \(peopleHere)")
+                Text("\(model.room?.name ?? "Room") · \(peopleHere)")
                     .font(.system(size: 12.5, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -157,8 +156,7 @@ struct RoomShareChip: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .padding(.horizontal, 9).frame(height: 22)
-        .background(Color.accentColor.opacity(0.14), in: Capsule())
+        .chipCapsule(tint: .accentColor)
         .help(level == .withLog
               ? "This run is in the room, with its log. Others can watch and ask to continue it."
               : "This run is in the room. Others can watch and ask to continue it.")

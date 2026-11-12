@@ -35,8 +35,6 @@ final class RoomStore {
     @ObservationIgnored var viewCenter = CGPoint(x: 480, y: 320)
     /// What this Mac is typing into each chat tile. Never sent; shared by the canvas tile and its popped-out tab.
     var chatDrafts: [UUID: String] = [:]
-    /// This Mac's runs that are in the room (by conversation id) and how much of each is shown. Never sent.
-    private(set) var sharedRuns: [UUID: RunShareLevel] = [:]
 
     @ObservationIgnored let peers: PeerService
     @ObservationIgnored private let service: RoomService
@@ -78,6 +76,9 @@ final class RoomStore {
     var localName: String { peers.localDisplayName }
     /// How many people are at the table, this Mac included.
     var presentCount: Int { members.count }
+    /// This Mac's runs that are in the room (by conversation id) and how much of each is shown. Never sent;
+    /// changes are reported through `onChange`.
+    var sharedRuns: [UUID: RunShareLevel] { runs.levels }
 
     /// Nearby people who are not at the table yet.
     var invitablePeers: [NearbyPeer] {
@@ -181,7 +182,6 @@ final class RoomStore {
     private func stopWork() {
         engine.reset()
         runs.reset()
-        sharedRuns = [:]
         inbox.reset()
         moveFlush?.cancel()
         moveFlush = nil
@@ -353,14 +353,7 @@ final class RoomStore {
     func spawnChat(question: String, selected: Set<UUID>) -> UUID? {
         let question = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(RoomLimits.maxQuestionLength))
         guard isActive else { return nil }
-        let sources = tiles.filter { selected.contains($0.id) }.sorted { ($0.y, $0.x) < ($1.y, $1.x) }
-            .prefix(RoomLimits.maxSpawnSources)
-
-        // Beside the selection; otherwise in the middle of the view.
-        var spot: CGPoint?
-        if let right = sources.map({ $0.x + RoomMetrics.width(for: $0) }).max(), let top = sources.map(\.y).min() {
-            spot = freeSpot(near: CGPoint(x: right + 70, y: top))
-        }
+        let (sources, spot) = spawnSources(selected)
 
         // Every selected chat's files come along. Ones this Mac already holds are ready at once;
         // the rest are sent over by the chat that has them.
@@ -391,8 +384,19 @@ final class RoomStore {
                                    runIDs: runIDs.filter { seenRuns.insert($0).inserted },
                                    spawnedFrom: sources.map(\.id), spawnedLabels: sources.map(\.shortLabel), at: spot) else { return nil }
         for source in askOwners { post(.requestFiles(from: source, to: id)) }
-        engine.begin(id, from: Array(sources), ask: !question.isEmpty)
+        engine.begin(id, from: sources, ask: !question.isEmpty)
         return id
+    }
+
+    /// The selected tiles a new chat or run starts from, top to bottom, and a free spot beside them for it
+    /// (nil, so it lands where new tiles do, when nothing is selected).
+    func spawnSources(_ selected: Set<UUID>) -> (sources: [RoomTile], spot: CGPoint?) {
+        let sources = Array(tiles.filter { selected.contains($0.id) }.sorted { ($0.y, $0.x) < ($1.y, $1.x) }
+            .prefix(RoomLimits.maxSpawnSources))
+        guard let right = sources.map({ $0.x + RoomMetrics.width(for: $0) }).max(), let top = sources.map(\.y).min() else {
+            return (sources, nil)
+        }
+        return (sources, freeSpot(near: CGPoint(x: right + 70, y: top)))
     }
 
     // MARK: Files (always inside a chat tile)
@@ -628,50 +632,34 @@ final class RoomStore {
     }
 
     /// Puts one of this Mac's Claude Code or Codex chats in the room as a live tile that people can continue.
-    /// `level` says how much the room sees. If the run is already in the room, only its level changes.
+    /// `level` says how much the room sees. A run already in the room keeps its tile and its level
+    /// (`setShareLevel` changes that).
     @discardableResult
     func shareRun(_ conversation: Conversation, level: RunShareLevel = .steps) -> UUID? {
         guard isActive else { return nil }
         if let existing = runs.tileID(for: conversation.id) {
-            if tile(existing) != nil {
-                runs.setLevel(level, forConversation: conversation.id)
-                recordShare(level, for: conversation.id)
-                return existing
-            }
+            if tile(existing) != nil { return existing }
             // Its tile is gone; share it afresh.
             runs.tileRemoved(existing)
-            recordShare(nil, for: conversation.id)
         }
         guard let snapshot = runs.snapshot(of: conversation.id, level: level),
               let tile = makeTile(.run(snapshot), at: nil, width: RoomMetrics.runWidth), post(.addTile(tile)) else { return nil }
         runs.track(conversation.id, as: tile.id, level: level)
-        recordShare(level, for: conversation.id)
         return tile.id
     }
 
     /// Takes one of this Mac's runs back out of the room (its tile is removed for everyone; the run goes on here).
+    /// If the removal is refused, the tile and the share stay.
     func unshareRun(conversationID: UUID) {
-        if let tileID = runs.tileID(for: conversationID) {
-            removeTile(tileID)
-            // If the removal was refused the tile stays, and so does the share. Otherwise stop sending updates.
-            guard tile(tileID) == nil else { return }
-            runs.tileRemoved(tileID)
-        }
-        recordShare(nil, for: conversationID)
+        guard let tileID = runs.tileID(for: conversationID) else { return }
+        removeTile(tileID)
+        if tile(tileID) == nil { runs.tileRemoved(tileID) }
     }
 
     /// Changes how much of a shared run the room sees, from the next update on.
     func setShareLevel(_ level: RunShareLevel, for conversationID: UUID) {
-        guard isActive, sharedRuns[conversationID] != nil else { return }
+        guard isActive else { return }
         runs.setLevel(level, forConversation: conversationID)
-        recordShare(level, for: conversationID)
-    }
-
-    /// Notes which of this Mac's runs are in the room (nil: not any more), and tells the app when that changes.
-    private func recordShare(_ level: RunShareLevel?, for conversationID: UUID) {
-        guard sharedRuns[conversationID] != level else { return }
-        sharedRuns[conversationID] = level
-        onChange?()
     }
 
     /// Puts one of this Mac's OpenAI chats in the room as a chat tile: its text, and its images as files.
@@ -836,7 +824,6 @@ final class RoomStore {
             engine.sendFiles(from: source, to: target)
         case .removeTile(let id):
             engine.tileRemoved(id)
-            if let conversationID = runs.conversationID(for: id) { recordShare(nil, for: conversationID) }
             runs.tileRemoved(id)
             inbox.tileRemoved(id)
             runLogs[id] = nil

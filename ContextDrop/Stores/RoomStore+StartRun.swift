@@ -26,39 +26,29 @@ extension RoomStore {
             return nil
         }
 
-        // The same tiles, in the same order, as a chat spawned from this selection.
-        let sources = Array(tiles.filter { selected.contains($0.id) }.sorted { ($0.y, $0.x) < ($1.y, $1.x) }
-            .prefix(RoomLimits.maxSpawnSources))
-
-        // Beside the selection; otherwise wherever a shared run lands.
-        var spot: CGPoint?
-        if let right = sources.map({ $0.x + RoomMetrics.width(for: $0) }).max(), let top = sources.map(\.y).min() {
-            spot = freeSpot(near: CGPoint(x: right + 70, y: top))
-        }
+        // The same tiles, in the same order and beside them, as a chat spawned from this selection.
+        let (sources, spot) = spawnSources(selected)
 
         // The prompt decides which files it names as attached; only those are copied and given to the agent.
-        let held = Set(heldFileIDs(of: sources))
+        let held = Set(sources.compactMap(\.chat).flatMap(\.files).map(\.id).filter(engine.holds))
         var built = RoomRunStart.build(question: question, sources: sources, localFileIDs: held)
         var attachments: [Attachment] = []
         var copied = Set<UUID>()
-        for fileID in built.attachedFileIDs {
-            guard let file = sources.compactMap(\.chat).flatMap(\.files).first(where: { $0.id == fileID }),
-                  let source = engine.localCopy(of: fileID),
+        for file in built.attached {
+            guard let source = engine.localCopy(of: file.id),
                   let attachment = Self.attachmentCopy(of: source, name: file.name) else { continue }
             attachments.append(attachment)
-            copied.insert(fileID)
+            copied.insert(file.id)
         }
-        // A copy failed: name that file as not attached instead.
-        if copied.count < built.attachedFileIDs.count {
+        // A copy failed (or the file is gone): name that file as not attached instead.
+        if copied.count < built.attached.count {
             built = RoomRunStart.build(question: question, sources: sources, localFileIDs: copied)
         }
 
         let id = chats.newConversation(provider: provider)
         chats.setFolder(folder, for: id)
         chats.setPermissionLevel(level, for: id)
-        // Room content was written by other people (or their models), so this first answer runs at most at
-        // "Ask before editing": every edit or command comes back to me, as with someone else's follow-up.
-        chats.ask(built.text, attachments: attachments, levelCap: sources.isEmpty ? nil : .ask, in: id)
+        chats.ask(built.text, attachments: attachments, levelCap: built.levelCap, in: id)
 
         guard let conversation = chats.conversation(id), let tileID = shareRun(conversation) else {
             notice = "The run started on your Mac, but it couldn’t be put in the room. Share it from its tab."
@@ -68,16 +58,8 @@ extension RoomStore {
         return tileID
     }
 
-    /// Files of the selected chats that this Mac holds a copy of, so they can go with the prompt.
-    private func heldFileIDs(of sources: [RoomTile]) -> [UUID] {
-        sources.compactMap(\.chat).flatMap(\.files).map(\.id).filter { fileID in
-            engine.localCopy(of: fileID).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
-        }
-    }
-
     /// Copies a file into its own folder in the Attachments folder (the same place `RoomRunInbox` keeps a
-    /// follow-up's files), so it keeps its name for the agent. Images go as images, everything else as a file
-    /// the agent reads itself.
+    /// follow-up's files), so it keeps its name for the agent.
     private static func attachmentCopy(of source: URL, name: String) -> Attachment? {
         let id = UUID()
         guard let copy = RoomRunInbox.destination(for: id, name: name) else { return nil }
@@ -85,6 +67,6 @@ extension RoomStore {
             try? FileManager.default.removeItem(at: copy.deletingLastPathComponent())
             return nil
         }
-        return Attachment(id: id, path: copy.path, name: name, isReference: Attachments.isImage(copy) ? nil : true)
+        return RoomRunInbox.attachment(id: id, at: copy, name: name)
     }
 }

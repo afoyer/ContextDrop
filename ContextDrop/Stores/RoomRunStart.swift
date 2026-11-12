@@ -8,32 +8,37 @@ import Foundation
 /// with someone else's follow-up.
 enum RoomRunStart {
     /// The most text the room's context may add, all tiles together. Each tile also stays within
-    /// `RoomLimits.maxTextLength`. The same size as the context a spawned chat tile starts from.
-    static let maxContextLength = 3 * RoomLimits.maxTextLength
+    /// `RoomLimits.maxTextLength`.
+    static let maxContextLength = RoomLimits.maxContextLength
     /// The longest prompt this ever returns: the question, the context, and the fixed wording around them.
     static let maxLength = RoomLimits.maxQuestionLength + maxContextLength + 2_000
     /// File names listed in the context, all chats together.
     static let maxListedFiles = RoomLimits.maxFilesPerChat
 
+    struct Built {
+        var text: String
+        /// The files the prompt names as attached, in order. Only those may go with it, so the agent is never
+        /// given a file the prompt doesn't introduce.
+        var attached: [RoomFile]
+        /// The most the run's first answer may do on its own: room content was written by other people (or their
+        /// models), so with any of it in the prompt every edit or command comes back to me, as with someone
+        /// else's follow-up.
+        var levelCap: PermissionLevel?
+    }
+
     /// The question, and (when tiles are selected) a "Context from the room" block: each tile's kind, who added
     /// it and its text, plus the files of each selected chat. Files in `localFileIDs` go with the prompt as
     /// attachments; the others are named as not attached, on the Mac that holds them.
-    static func prompt(question: String, sources: [RoomTile], localFileIDs: Set<UUID>) -> String {
-        build(question: question, sources: sources, localFileIDs: localFileIDs).text
-    }
-
-    /// The prompt, and the ids of the files it names as attached (in order). Only those may go with it, so the
-    /// agent is never given a file the prompt doesn't introduce.
-    static func build(question: String, sources: [RoomTile], localFileIDs: Set<UUID>) -> (text: String, attachedFileIDs: [UUID]) {
+    static func build(question: String, sources: [RoomTile], localFileIDs: Set<UUID>) -> Built {
         let question = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(RoomLimits.maxQuestionLength))
-        let context = contextBlock(sources.prefix(RoomLimits.maxSpawnSources), localFileIDs: localFileIDs)
-        guard let context else { return (question, []) }
-
+        guard let context = contextBlock(sources.prefix(RoomLimits.maxSpawnSources), localFileIDs: localFileIDs) else {
+            return Built(text: question, attached: [], levelCap: nil)
+        }
         var text = question.isEmpty ? context.text : question + "\n\n" + context.text
-        if !context.attachedIDs.isEmpty {
+        if !context.attached.isEmpty {
             text += "\n\n" + RoomRunInbox.untrustedFiles(from: "people in the room")
         }
-        return (text, context.attachedIDs)
+        return Built(text: text, attached: context.attached, levelCap: .ask)
     }
 
     // MARK: Context
@@ -41,7 +46,7 @@ enum RoomRunStart {
     private struct Context {
         var text: String
         /// The files that go with the prompt.
-        var attachedIDs: [UUID]
+        var attached: [RoomFile]
     }
 
     private static func contextBlock(_ sources: ArraySlice<RoomTile>, localFileIDs: Set<UUID>) -> Context? {
@@ -51,23 +56,21 @@ enum RoomRunStart {
         var remaining = maxContextLength
         var filesLeft = maxListedFiles
         var parts: [String] = []
-        var attachedIDs: [UUID] = []
+        var attached: [RoomFile] = []
         var leftOut = 0
         var listed = Set<UUID>()
 
         for tile in sources {
-            let header = "[\(label(of: tile))]"
+            let header = "[\(tile.contextLabel)]"
             var fileLines: [String] = []
-            var tileFiles: [UUID] = []
-            var tileAttached: [UUID] = []
+            var tileFiles: [RoomFile] = []
             // A chat spawned from another shares its files; each is listed once.
-            for file in tile.chat?.files ?? [] where !listed.contains(file.id) && !tileFiles.contains(file.id) {
+            for file in tile.chat?.files ?? [] where !listed.contains(file.id) && !tileFiles.contains(where: { $0.id == file.id }) {
                 guard tileFiles.count < filesLeft else { break }
-                tileFiles.append(file.id)
+                tileFiles.append(file)
                 let name = String(file.name.prefix(RoomLimits.maxFileNameLength))
                 if localFileIDs.contains(file.id) {
                     fileLines.append("- \(name): attached")
-                    tileAttached.append(file.id)
                 } else {
                     fileLines.append("- \(name): not attached (on \(tile.ownerName)'s Mac)")
                 }
@@ -86,8 +89,8 @@ enum RoomRunStart {
             remaining -= part.count + 2
             parts.append(part)
             filesLeft -= tileFiles.count
-            listed.formUnion(tileFiles)
-            attachedIDs += tileAttached
+            listed.formUnion(tileFiles.map(\.id))
+            attached += tileFiles.filter { localFileIDs.contains($0.id) }
         }
         guard !parts.isEmpty else { return nil }
         if leftOut > 0 {
@@ -103,25 +106,12 @@ enum RoomRunStart {
         \(defused(parts.joined(separator: "\n\n")))
         </room-context>
         """
-        return Context(text: text, attachedIDs: attachedIDs)
+        return Context(text: text, attached: attached)
     }
 
     /// Room text can't close the markers early (in any spelling) and pass itself off as something I wrote:
     /// every angle bracket in it becomes a look-alike that isn't markup.
     private static func defused(_ text: String) -> String {
         text.replacingOccurrences(of: "<", with: "‹").replacingOccurrences(of: ">", with: "›")
-    }
-
-    /// What kind of tile it is and who is behind it, e.g. "Note by Bob" or "Chat “Pricing”, run by Alice".
-    private static func label(of tile: RoomTile) -> String {
-        switch tile.content {
-        case .card(let body):
-            return "\(body.kind.label) by \(tile.addedBy)"
-        case .chat(let chat):
-            let title = chat.title.isEmpty ? RoomReducer.untitledChat : String(chat.title.prefix(RoomLimits.maxTitleLength))
-            return "Chat “\(title)”, run by \(chat.ownerName)"
-        case .run(let run):
-            return "\(run.agent) run, by \(run.ownerName)"
-        }
     }
 }
