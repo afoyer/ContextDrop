@@ -181,6 +181,7 @@ final class RoomStore {
     private func stopWork() {
         engine.reset()
         runs.reset()
+        sharedRuns = [:]
         inbox.reset()
         moveFlush?.cancel()
         moveFlush = nil
@@ -627,25 +628,50 @@ final class RoomStore {
     }
 
     /// Puts one of this Mac's Claude Code or Codex chats in the room as a live tile that people can continue.
+    /// `level` says how much the room sees. If the run is already in the room, only its level changes.
     @discardableResult
     func shareRun(_ conversation: Conversation, level: RunShareLevel = .steps) -> UUID? {
-        // TODO(share-store): pass `level` to the broadcaster and record it in `sharedRuns`.
         guard isActive else { return nil }
-        if let existing = runs.tileID(for: conversation.id), tile(existing) != nil { return existing }
-        guard let snapshot = runs.snapshot(of: conversation.id),
+        if let existing = runs.tileID(for: conversation.id) {
+            if tile(existing) != nil {
+                runs.setLevel(level, forConversation: conversation.id)
+                recordShare(level, for: conversation.id)
+                return existing
+            }
+            // Its tile is gone; share it afresh.
+            runs.tileRemoved(existing)
+            recordShare(nil, for: conversation.id)
+        }
+        guard let snapshot = runs.snapshot(of: conversation.id, level: level),
               let tile = makeTile(.run(snapshot), at: nil, width: RoomMetrics.runWidth), post(.addTile(tile)) else { return nil }
-        runs.track(conversation.id, as: tile.id)
+        runs.track(conversation.id, as: tile.id, level: level)
+        recordShare(level, for: conversation.id)
         return tile.id
     }
 
     /// Takes one of this Mac's runs back out of the room (its tile is removed for everyone; the run goes on here).
     func unshareRun(conversationID: UUID) {
-        // TODO(share-store)
+        if let tileID = runs.tileID(for: conversationID) {
+            removeTile(tileID)
+            // If the removal was refused the tile stays, and so does the share. Otherwise stop sending updates.
+            guard tile(tileID) == nil else { return }
+            runs.tileRemoved(tileID)
+        }
+        recordShare(nil, for: conversationID)
     }
 
     /// Changes how much of a shared run the room sees, from the next update on.
     func setShareLevel(_ level: RunShareLevel, for conversationID: UUID) {
-        // TODO(share-store)
+        guard isActive, sharedRuns[conversationID] != nil else { return }
+        runs.setLevel(level, forConversation: conversationID)
+        recordShare(level, for: conversationID)
+    }
+
+    /// Notes which of this Mac's runs are in the room (nil: not any more), and tells the app when that changes.
+    private func recordShare(_ level: RunShareLevel?, for conversationID: UUID) {
+        guard sharedRuns[conversationID] != level else { return }
+        sharedRuns[conversationID] = level
+        onChange?()
     }
 
     /// Puts one of this Mac's OpenAI chats in the room as a chat tile: its text, and its images as files.
@@ -805,6 +831,7 @@ final class RoomStore {
             engine.sendFiles(from: source, to: target)
         case .removeTile(let id):
             engine.tileRemoved(id)
+            if let conversationID = runs.conversationID(for: id) { recordShare(nil, for: conversationID) }
             runs.tileRemoved(id)
             inbox.tileRemoved(id)
             runLogs[id] = nil

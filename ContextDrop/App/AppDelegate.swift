@@ -39,6 +39,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         panelModel.actions.openRoom = { [weak self] in self?.openRoom() }
         panelModel.actions.sendToRoom = { [weak self] message, conversation in self?.sendToRoom(message, from: conversation) }
         panelModel.actions.sendTabToRoom = { [weak self] conversation in self?.sendTabToRoom(conversation) }
+        panelModel.actions.shareRun = { [weak self] conversation, level in self?.shareRun(conversation, level: level) }
+        panelModel.actions.unshareRun = { [weak self] id in self?.unshareRun(id) }
+        panelModel.actions.setShareLevel = { [weak self] id, level in self?.setShareLevel(level, for: id) }
 
         // What counts as "on screen" (never unseen), and which empty chats must survive.
         store.visibleConversations = { [weak self] in
@@ -86,6 +89,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         roomStore.onChange = { [weak self] in
             guard let self else { return }
             self.panelModel.roomActive = self.roomStore.isActive
+            self.panelModel.roomName = self.roomStore.isActive ? self.roomStore.room?.name : nil
+            self.panelModel.roomPeople = self.roomStore.presentCount
+            self.panelModel.roomRuns = self.roomStore.sharedRuns
             self.roomWindow.roomChanged()
             self.menuBar.refresh()
         }
@@ -251,8 +257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard roomStore.isActive else { return }
         switch conversation.provider.roomShare {
         case .liveRun:
-            guard roomStore.shareRun(conversation) != nil else { return }
-            notices.text = "This run is in the room. Others can watch and ask to continue it; nothing they send runs until you OK it. Secrets in the log are hidden."
+            // A run already in the room keeps its level.
+            guard shareRun(conversation, level: roomStore.sharedRuns[conversation.id] ?? .steps) else { return }
         case .chatCopy:
             guard roomStore.shareChat(conversation) != nil else { return }
             notices.text = "This chat is in the room as a copy. Anyone there can reply; it answers from your Mac."
@@ -261,6 +267,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return
         }
         roomWindow.show()
+    }
+
+    /// The room chip (and ⌘⇧R on a run tab): puts a run in the room at `level`, or changes its level if it is
+    /// already there. The room window stays shut, since this is used from Quick Chat. True if the run is in the room.
+    @discardableResult
+    private func shareRun(_ conversation: Conversation, level: RunShareLevel) -> Bool {
+        guard roomStore.isActive, conversation.provider.roomShare == .liveRun else { return false }
+        let previous = roomStore.sharedRuns[conversation.id]
+        guard roomStore.shareRun(conversation, level: level) != nil else { return false }
+        panelModel.lastShareLevel = level
+        if previous == level {
+            notices.text = "This run is already in the room."
+        } else if previous != nil {
+            notices.text = Self.levelNotice(level)
+        } else {
+            notices.text = level == .withLog
+                ? "This run is in the room with its log. Others can ask to continue it; nothing they send runs until you OK it. Secrets in the log are hidden."
+                : "This run is in the room: its steps and changed files. Others can ask to continue it; nothing they send runs until you OK it."
+        }
+        return true
+    }
+
+    /// "Take out of room" on the chip: the tile goes for everyone; the run carries on here.
+    private func unshareRun(_ conversationID: UUID) {
+        guard roomStore.sharedRuns[conversationID] != nil else { return }
+        roomStore.unshareRun(conversationID: conversationID)
+        notices.text = "This run is out of the room. It keeps going on your Mac."
+    }
+
+    /// "Show live log" on the chip.
+    private func setShareLevel(_ level: RunShareLevel, for conversationID: UUID) {
+        guard let current = roomStore.sharedRuns[conversationID], current != level else { return }
+        roomStore.setShareLevel(level, for: conversationID)
+        panelModel.lastShareLevel = level
+        notices.text = Self.levelNotice(level)
+    }
+
+    private static func levelNotice(_ level: RunShareLevel) -> String {
+        switch level {
+        case .withLog: "The room now sees this run’s log too. Secrets in it are hidden."
+        case .steps: "The room no longer gets this run’s log."
+        }
     }
 
     // MARK: Settings

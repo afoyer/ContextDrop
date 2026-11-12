@@ -129,6 +129,8 @@ final class PanelModel {
     var roomName: String?
     var roomPeople = 0
     var roomRuns: [UUID: RunShareLevel] = [:]
+    /// The level a run was last put in the room at; ⌘⇧R shares the next one the same way.
+    var lastShareLevel: RunShareLevel = .steps
 
     init(store: ChatStore) {
         self.store = store
@@ -413,11 +415,16 @@ final class PanelModel {
         input.focusedMessageID = target
     }
 
-    /// ⌘⇧R: put the focused (or latest) answer in the room. For a Claude Code or Codex chat, the run itself goes in.
+    /// ⌘⇧R: put the focused (or latest) answer in the room. For a Claude Code or Codex chat, the run itself goes in
+    /// at the last level used; if it is already there, the room opens instead.
     func sendFocusedToRoom(in id: UUID) {
         guard roomActive, let conversation = store.conversation(id) else { return }
         if conversation.provider.roomShare == .liveRun {
-            actions.sendTabToRoom(conversation)
+            if roomRuns[id] != nil {
+                actions.openRoom()
+            } else {
+                actions.shareRun(conversation, lastShareLevel)
+            }
             return
         }
         let input = session(id)

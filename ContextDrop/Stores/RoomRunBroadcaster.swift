@@ -3,16 +3,20 @@ import Foundation
 /// The owner's side of run tiles: summarises this Mac's Claude Code and Codex runs for the room, about twice a second.
 ///
 /// The run itself never leaves this Mac; the room only gets the plan, the current state, subagents, changed files
-/// (names and line counts) and recent log lines, all passed through `SecretMasker`. Follow-ups from the room run
-/// only once the owner accepts them (`RoomRunInbox`).
+/// (names and line counts) and, if the owner chose "Live run + log", recent log lines, all passed through
+/// `SecretMasker`. Follow-ups from the room run only once the owner accepts them (`RoomRunInbox`).
 @MainActor
 final class RoomRunBroadcaster {
     private unowned let store: RoomStore
 
     private struct Tracked {
         var conversationID: UUID
+        /// How much of the run the room sees. Kept here only.
+        var level: RunShareLevel = .steps
+        /// The last summary sent, after `level` was applied.
         var last: RoomRunTile?
-        /// Log lines already numbered for the room, newest last.
+        /// Log lines already numbered for the room, newest last. Kept at every level, so turning the log on
+        /// later carries on the same numbering and watchers stitch it to what they saw before.
         var log: [RunLogLine] = []
         var nextSeq = 0
         var lastLineID: UUID?
@@ -35,8 +39,8 @@ final class RoomRunBroadcaster {
 
     func conversationID(for tileID: UUID) -> UUID? { tracked[tileID]?.conversationID }
 
-    func track(_ conversationID: UUID, as tileID: UUID) {
-        tracked[tileID] = Tracked(conversationID: conversationID)
+    func track(_ conversationID: UUID, as tileID: UUID, level: RunShareLevel = .steps) {
+        tracked[tileID] = Tracked(conversationID: conversationID, level: level)
         tick()
         guard loop == nil else { return }
         loop = Task { [weak self] in
@@ -46,6 +50,13 @@ final class RoomRunBroadcaster {
                 self.tick()
             }
         }
+    }
+
+    /// Changes how much of a run the room sees, and sends the change at once.
+    func setLevel(_ level: RunShareLevel, forConversation conversationID: UUID) {
+        guard let tileID = tileID(for: conversationID), tracked[tileID]?.level != level else { return }
+        tracked[tileID]?.level = level
+        tick()
     }
 
     func tileRemoved(_ id: UUID) {
@@ -67,7 +78,8 @@ final class RoomRunBroadcaster {
         guard store.isActive else { return }
         for tileID in Array(tracked.keys) {
             guard var entry = tracked[tileID] else { continue }
-            guard let run = build(&entry) else { continue }
+            guard let built = build(&entry) else { continue }
+            let run = Self.applying(entry.level, to: built)
             if run != entry.last {
                 entry.last = run
                 store.post(.runUpdate(tileID, run))
@@ -76,10 +88,18 @@ final class RoomRunBroadcaster {
         }
     }
 
-    /// The first summary of a run, before it has a tile.
-    func snapshot(of conversationID: UUID) -> RoomRunTile? {
-        var entry = Tracked(conversationID: conversationID)
-        return build(&entry)
+    /// The first summary of a run, before it has a tile, showing as much as `level` allows.
+    func snapshot(of conversationID: UUID, level: RunShareLevel = .steps) -> RoomRunTile? {
+        var entry = Tracked(conversationID: conversationID, level: level)
+        return build(&entry).map { Self.applying(level, to: $0) }
+    }
+
+    /// What the room sees of a run at a level: without the log for `.steps`, everything for `.withLog`.
+    nonisolated static func applying(_ level: RunShareLevel, to run: RoomRunTile) -> RoomRunTile {
+        guard level == .steps else { return run }
+        var run = run
+        run.log = []
+        return run
     }
 
     // MARK: Summary
