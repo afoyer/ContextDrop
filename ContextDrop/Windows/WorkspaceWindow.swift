@@ -226,7 +226,9 @@ struct WorkspaceView: View {
                         .help(model.showTerminal ? "Hide activity (⌥⌘A)" : "Show activity (⌥⌘A)")
                         .accessibilityLabel(model.showTerminal ? "Hide activity" : "Show activity")
                 }
-                if model.roomActive, conversation.provider.roomShare != .none, !conversation.messages.isEmpty {
+                if conversation.provider.roomShare == .liveRun {
+                    RoomShareChip(model: model, conversation: conversation)
+                } else if model.roomActive, conversation.provider.roomShare == .chatCopy, !conversation.messages.isEmpty {
                     Button { model.actions.sendTabToRoom(conversation) } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "square.grid.2x2")
@@ -234,9 +236,7 @@ struct WorkspaceView: View {
                         }
                     }
                     .controlSize(.small)
-                    .help(conversation.provider.roomShare == .liveRun
-                          ? "Put this run in the room. Others can watch and ask to continue it; you OK each follow-up."
-                          : "Put this chat in the room. Anyone there can reply; it answers from your Mac.")
+                    .help("Put this chat in the room. Anyone there can reply; it answers from your Mac.")
                 }
                 Button { share(conversation) } label: {
                     HStack(spacing: 4) {
