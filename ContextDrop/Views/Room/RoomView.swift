@@ -22,6 +22,12 @@ struct RoomView: View {
     @State private var showTakeHome = false
     @State private var watching: UUID?
     @State private var typingTiles: Set<UUID> = []
+    /// Where the ask bar sends what is typed. Kept while this window is open.
+    @State private var askDestination: RoomAskDestination = .chat
+    /// A folder chosen in the ask bar for runs; nil uses the last folder a coding agent worked in.
+    @State private var runFolder: URL?
+    /// A level chosen in the ask bar for runs; nil uses the default from Settings › Providers.
+    @State private var runLevel: PermissionLevel?
     @FocusState private var askFocused: Bool
 
     var body: some View {
@@ -460,7 +466,29 @@ struct RoomView: View {
     private var askBar: some View {
         let tiles = selectedTiles
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let providers = RoomAskDestination.runProviders(store.chats)
+        let runProvider = activeRunProvider(providers)
+        let destination: RoomAskDestination = runProvider.map { .run($0) } ?? .chat
         return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("To")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                    .accessibilityHidden(true)
+                RoomAskDestinationMenu(destination: destination, selectedCount: tiles.count, providers: providers) {
+                    askDestination = $0
+                }
+                if runProvider != nil {
+                    RoomRunFolderChip(folder: runFolderOrDefault) { _ = chooseRunFolder() }
+                    PermissionLevelMenu(level: runLevelOrDefault, compact: true,
+                                        help: "What the run may do on your Mac without asking you.") { runLevel = $0 }
+                }
+                Spacer(minLength: 8)
+                RoomAskBadge(acts: runProvider != nil)
+            }
+            .accessibilityElement(children: .contain)
+
             HStack(spacing: 6) {
                 Text(tiles.isEmpty ? "Nothing selected" : "\(tiles.count) selected")
                     .font(.system(size: 11.5, weight: .semibold))
@@ -473,7 +501,7 @@ struct RoomView: View {
                     Text("+\(tiles.count - 4)").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
-                Text(tiles.isEmpty ? "Everyone can see chats started here" : "The new chat starts from what you selected")
+                Text(selectionHint(empty: tiles.isEmpty, run: runProvider != nil))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -481,31 +509,48 @@ struct RoomView: View {
             .accessibilityElement(children: .combine)
 
             HStack(spacing: 8) {
-                TextField("Ask the room…", text: $question)
+                TextField(destination.placeholder, text: $question)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
                     .focused($askFocused)
-                    .onSubmit { spawn(question: question, from: selection) }
-                Button {
-                    spawn(question: "", from: selection)
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(tiles.isEmpty ? "New chat" : "New chat from selection")
-                        Text("⌘N").foregroundStyle(.secondary)
+                    .onSubmit {
+                        if let runProvider { startRun(runProvider) } else { spawn(question: question, from: selection) }
                     }
-                }
-                .help("A new chat tile on your Mac, started from the selected chats, their files and the selected cards")
-                Button {
-                    spawn(question: question, from: selection)
-                } label: {
-                    HStack(spacing: 4) {
-                        Text("Ask")
-                        Text("↵").opacity(0.8)
+                if let runProvider {
+                    Button {
+                        startRun(runProvider)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Start run on my Mac")
+                            Text("↵").opacity(0.8)
+                        }
                     }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(trimmed.isEmpty)
+                    .help("Starts \(runProvider.displayName) in the folder on your Mac and puts the run in the room.")
+                    .accessibilityLabel("Start \(runProvider.displayName) run on my Mac")
+                } else {
+                    Button {
+                        spawn(question: "", from: selection)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(tiles.isEmpty ? "New chat" : "New chat from selection")
+                            Text("⌘N").foregroundStyle(.secondary)
+                        }
+                    }
+                    .help("A new chat tile on your Mac, started from the selected chats, their files and the selected cards")
+                    Button {
+                        spawn(question: question, from: selection)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Ask")
+                            Text("↵").opacity(0.8)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(trimmed.isEmpty)
+                    .accessibilityLabel("Ask the room")
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(trimmed.isEmpty)
-                .accessibilityLabel("Ask the room")
             }
         }
         .padding(12)
@@ -520,8 +565,40 @@ struct RoomView: View {
         let asked = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard let id = store.spawnChat(question: text, selected: ids) else { return }
         if asked { question = "" }
-        selection = [id]
-        reveal(id)
+        show(id)
+    }
+
+    /// The run provider the ask bar is set to, if it can still start one here.
+    private func activeRunProvider(_ providers: [(kind: ProviderKind, status: ProviderStatus)]) -> ProviderKind? {
+        guard let provider = askDestination.provider else { return nil }
+        return providers.contains { $0.kind == provider && $0.status.isUsable } ? provider : nil
+    }
+
+    private func selectionHint(empty: Bool, run: Bool) -> String {
+        if run { return empty ? "Select chats or cards to give the run context" : "The run starts from what you selected" }
+        return empty ? "Everyone can see chats started here" : "The new chat starts from what you selected"
+    }
+
+    private var runFolderOrDefault: URL? { runFolder ?? AppDefaults.lastFolder ?? AppDefaults.folder }
+
+    private var runLevelOrDefault: PermissionLevel { runLevel ?? AppDefaults.permissionLevel }
+
+    /// Asks for the folder a run works in. Nil when cancelled.
+    private func chooseRunFolder() -> URL? {
+        guard let url = FilePicker.folders(prompt: "Use Folder", message: "Choose the project folder the run works in.").first else { return nil }
+        runFolder = url
+        return url
+    }
+
+    /// A run of `provider` on this Mac, started from the selection and already in the room.
+    private func startRun(_ provider: ProviderKind) {
+        guard store.isActive else { return }
+        let prompt = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, let folder = runFolderOrDefault ?? chooseRunFolder() else { return }
+        guard let id = store.startRun(provider: provider, prompt: prompt, selected: selection,
+                                      folder: folder, level: runLevelOrDefault) else { return }
+        question = ""
+        show(id)
     }
 
     // MARK: Lobby (no room yet)
