@@ -29,8 +29,9 @@ final class RoomRunInbox {
 
     // MARK: Files
 
-    /// Where a follow-up's file is kept: its own folder, so it keeps its name for the agent.
-    private static func destination(for fileID: UUID, name: String) -> URL? {
+    /// Where a follow-up's file (or a file a run started from the room is given) is kept: its own folder in the
+    /// Attachments folder, so it keeps its name for the agent.
+    static func destination(for fileID: UUID, name: String) -> URL? {
         let dir = Attachments.directory.appendingPathComponent("Room/\(fileID.uuidString)", isDirectory: true)
         guard (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else { return nil }
         let safe = name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")

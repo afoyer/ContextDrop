@@ -63,7 +63,7 @@ extension RoomStore {
             for file in chat.files where !seen.contains(file.id) {
                 guard seen.count < RoomRunStart.maxListedFiles else { return held }
                 seen.insert(file.id)
-                guard engine.holds(file.id), let source = localCopy(of: file),
+                guard let source = engine.localCopy(of: file.id), FileManager.default.fileExists(atPath: source.path),
                       let attachment = Self.attachmentCopy(of: source, name: file.name) else { continue }
                 held.append((file.id, attachment))
             }
@@ -71,26 +71,14 @@ extension RoomStore {
         return held
     }
 
-    /// Where `RoomChatEngine` keeps a file it holds for this room: Application Support/ContextDrop/RoomFiles/
-    /// <room>/<file id>.<ext>. Nil when it isn't there.
-    private func localCopy(of file: RoomFile) -> URL? {
-        guard let roomID = room?.id,
-              let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
-        let url = base.appendingPathComponent("ContextDrop/RoomFiles/\(roomID.uuidString)", isDirectory: true)
-            .appendingPathComponent(file.id.uuidString).appendingPathExtension((file.name as NSString).pathExtension)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
-    }
-
-    /// Copies a file into its own folder in the Attachments folder (Attachments/Room/<id>/<name>), so it keeps
-    /// its name for the agent. Images go as images, everything else as a file the agent reads itself.
+    /// Copies a file into its own folder in the Attachments folder (the same place `RoomRunInbox` keeps a
+    /// follow-up's files), so it keeps its name for the agent. Images go as images, everything else as a file
+    /// the agent reads itself.
     private static func attachmentCopy(of source: URL, name: String) -> Attachment? {
         let id = UUID()
-        let dir = Attachments.directory.appendingPathComponent("Room/\(id.uuidString)", isDirectory: true)
-        guard (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else { return nil }
-        let safe = name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
-        let copy = dir.appendingPathComponent(safe.isEmpty || safe.hasPrefix(".") ? "file" + safe : safe)
+        guard let copy = RoomRunInbox.destination(for: id, name: name) else { return nil }
         guard (try? FileManager.default.copyItem(at: source, to: copy)) != nil else {
-            try? FileManager.default.removeItem(at: dir)
+            try? FileManager.default.removeItem(at: copy.deletingLastPathComponent())
             return nil
         }
         return Attachment(id: id, path: copy.path, name: name, isReference: Attachments.isImage(copy) ? nil : true)

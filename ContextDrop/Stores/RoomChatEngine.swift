@@ -42,6 +42,9 @@ final class RoomChatEngine {
     /// This Mac already has the file (so a chat spawned here can use it at once).
     func holds(_ fileID: UUID) -> Bool { localFiles[fileID] != nil }
 
+    /// This Mac's copy of a room file, if it holds one (read only; the engine owns and deletes it).
+    func localCopy(of fileID: UUID) -> URL? { localFiles[fileID] }
+
     // MARK: Leaving
 
     /// Cancels everything and removes what was stored for the room: local copies and the uploads at OpenAI.
