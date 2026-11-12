@@ -20,10 +20,6 @@ enum RoomRunStart {
         /// The files the prompt names as attached, in order. Only those may go with it, so the agent is never
         /// given a file the prompt doesn't introduce.
         var attached: [RoomFile]
-        /// The most the run's first answer may do on its own: room content was written by other people (or their
-        /// models), so with any of it in the prompt every edit or command comes back to me, as with someone
-        /// else's follow-up.
-        var levelCap: PermissionLevel?
     }
 
     /// The question, and (when tiles are selected) a "Context from the room" block: each tile's kind, who added
@@ -32,13 +28,13 @@ enum RoomRunStart {
     static func build(question: String, sources: [RoomTile], localFileIDs: Set<UUID>) -> Built {
         let question = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(RoomLimits.maxQuestionLength))
         guard let context = contextBlock(sources.prefix(RoomLimits.maxSpawnSources), localFileIDs: localFileIDs) else {
-            return Built(text: question, attached: [], levelCap: nil)
+            return Built(text: question, attached: [])
         }
         var text = question.isEmpty ? context.text : question + "\n\n" + context.text
         if !context.attached.isEmpty {
             text += "\n\n" + RoomRunInbox.untrustedFiles(from: "people in the room")
         }
-        return Built(text: text, attached: context.attached, levelCap: .ask)
+        return Built(text: text, attached: context.attached)
     }
 
     // MARK: Context

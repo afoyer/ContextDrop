@@ -62,7 +62,7 @@ struct RoomAskDestinationMenu: View {
                 Image(systemName: destination.symbol)
                 Text(destination.title(selected: selectedCount))
             }
-            .font(.system(size: 12, weight: .medium))
+            .font(.system(size: 12, weight: .semibold))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -82,7 +82,7 @@ struct RoomAskDestinationMenu: View {
     }
 }
 
-/// "Talks" for a chat, "Acts" for a run, with what that means for everyone in the room.
+/// "Talks" for a chat, "Acts" for a run. What that means for everyone in the room is in its help.
 struct RoomAskBadge: View {
     let acts: Bool
 
@@ -92,18 +92,11 @@ struct RoomAskBadge: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
-            RoomKindLabel(text: acts ? "Acts" : "Talks", color: color)
-                .padding(.horizontal, 6)
-                .frame(height: 17)
-                .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-            Text(detail)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-        }
-        .help(detail)
+        RoomKindLabel(text: acts ? "Acts" : "Talks", color: color)
+            .padding(.horizontal, 6)
+            .frame(height: 18)
+            .background(color.opacity(0.18), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .help(detail)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(acts ? "Acts" : "Talks"). \(detail)")
     }
@@ -119,6 +112,7 @@ struct RoomRunFolderChip: View {
             HStack(spacing: 5) {
                 Image(systemName: "folder")
                 Text(folder.map(FolderDrop.display) ?? "Choose folder…")
+                    .font(.system(size: 11.5, design: folder == nil ? .default : .monospaced))
                     .lineLimit(1)
                     .truncationMode(.head)
                     .frame(maxWidth: 170)
@@ -135,10 +129,14 @@ struct RoomRunFolderChip: View {
 }
 
 extension View {
-    /// The capsule a chip in an ask bar or chat header sits in: grey, or tinted with `tint` when it shows a state.
-    func chipCapsule(tint: Color? = nil) -> some View {
+    /// The capsule a chip in an ask bar or chat header sits in: grey, or tinted with `tint`. `outlined` adds a
+    /// hairline in the tint, for a chip that is a call to action rather than a state.
+    func chipCapsule(tint: Color? = nil, outlined: Bool = false) -> some View {
         padding(.horizontal, 9)
             .frame(height: 22)
-            .background(tint.map { AnyShapeStyle($0.opacity(0.14)) } ?? AnyShapeStyle(.quaternary.opacity(0.6)), in: Capsule())
+            .background(tint.map { AnyShapeStyle($0.opacity(0.16)) } ?? AnyShapeStyle(.quaternary.opacity(0.6)), in: Capsule())
+            .overlay {
+                if outlined { Capsule().strokeBorder((tint ?? .secondary).opacity(0.6), lineWidth: 0.5) }
+            }
     }
 }

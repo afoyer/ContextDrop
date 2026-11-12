@@ -481,26 +481,32 @@ struct RoomView: View {
                     askDestination = $0
                     if $0.provider != nil, runFolder == nil { runFolder = AppDefaults.lastFolder ?? AppDefaults.folder }
                 }
-                if runProvider != nil {
-                    RoomRunFolderChip(folder: runFolder) { _ = chooseRunFolder() }
-                    PermissionLevelMenu(level: runLevelOrDefault, compact: true,
-                                        help: "What the run may do on your Mac without asking you.") { runLevel = $0 }
-                }
                 Spacer(minLength: 8)
                 RoomAskBadge(acts: runProvider != nil)
             }
             .accessibilityElement(children: .contain)
 
             HStack(spacing: 6) {
-                Text(tiles.isEmpty ? "Nothing selected" : "\(tiles.count) selected")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(tiles.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(RoomPalette.chatLabel))
-                    .fixedSize()
-                ForEach(tiles.prefix(4)) { tile in
-                    RoomChip(text: tile.shortLabel, color: RoomPalette.labelColor(for: tile))
-                }
-                if tiles.count > 4 {
-                    Text("+\(tiles.count - 4)").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.secondary)
+                if runProvider != nil {
+                    // A run: where it works, what it may do, and what it starts from.
+                    RoomRunFolderChip(folder: runFolder) { _ = chooseRunFolder() }
+                    PermissionLevelMenu(level: runLevelOrDefault, compact: true,
+                                        help: "What the run may do on your Mac without asking you.") { runLevel = $0 }
+                    if !tiles.isEmpty {
+                        RoomChip(text: "+ \(tiles.count) selected", color: RoomPalette.chatLabel)
+                            .help(tiles.map(\.shortLabel).joined(separator: ", "))
+                    }
+                } else {
+                    Text(tiles.isEmpty ? "Nothing selected" : "\(tiles.count) selected")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(tiles.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(RoomPalette.chatLabel))
+                        .fixedSize()
+                    ForEach(tiles.prefix(4)) { tile in
+                        RoomChip(text: tile.shortLabel, color: RoomPalette.labelColor(for: tile))
+                    }
+                    if tiles.count > 4 {
+                        Text("+\(tiles.count - 4)").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.secondary)
+                    }
                 }
                 Spacer(minLength: 8)
                 Text(selectionHint(empty: tiles.isEmpty, run: runProvider != nil))
@@ -508,7 +514,7 @@ struct RoomView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: runProvider == nil ? .combine : .contain)
 
             HStack(spacing: 8) {
                 TextField(destination.placeholder, text: $question)
@@ -521,11 +527,12 @@ struct RoomView: View {
                         startRun(runProvider)
                     } label: {
                         HStack(spacing: 4) {
-                            Text("Start run on my Mac")
+                            Text("Start run on my Mac").fontWeight(.semibold)
                             Text("↵").opacity(0.8)
                         }
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(RoomPalette.go)
                     .disabled(trimmed.isEmpty)
                     .help("Starts \(runProvider.displayName) in the folder on your Mac and puts the run in the room.")
                     .accessibilityLabel("Start \(runProvider.displayName) run on my Mac")
@@ -582,7 +589,7 @@ struct RoomView: View {
     }
 
     private func selectionHint(empty: Bool, run: Bool) -> String {
-        if run { return empty ? "Select chats or cards to give the run context" : "The run starts from what you selected" }
+        if run { return empty ? "Select chats or cards to give it context" : "Starts from what you selected" }
         return empty ? "Everyone can see chats started here" : "The new chat starts from what you selected"
     }
 

@@ -26,8 +26,11 @@ final class RoomWindowController {
         let window = self.window ?? makeWindow()
         self.window = window
         window.title = store.room?.name ?? "Room"
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         window.makeKeyAndOrderFront(nil)
+        // Quick Chat and the menu bar don't activate the app, and macOS may turn the activation down;
+        // without this the new room can open behind the app that was in front.
+        window.orderFrontRegardless()
     }
 
     func close() {

@@ -171,15 +171,4 @@ final class RoomRunStartTests: XCTestCase {
         XCTAssertFalse(prompt.contains("</ room-context>"))
     }
 
-    // MARK: Level cap
-
-    func testAPromptWithoutRoomContentIsNotCapped() {
-        XCTAssertNil(RoomRunStart.build(question: "Go", sources: [], localFileIDs: []).levelCap)
-        XCTAssertNil(RoomRunStart.build(question: "Go", sources: [card(by: "Bob", text: "  ")], localFileIDs: []).levelCap)
-    }
-
-    func testRoomContentCapsTheFirstAnswerAtAsk() {
-        let built = RoomRunStart.build(question: "Go", sources: [card(by: "Bob", text: "Use the blue theme.")], localFileIDs: [])
-        XCTAssertEqual(built.levelCap, .ask)
-    }
 }
