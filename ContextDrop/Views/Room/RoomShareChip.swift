@@ -82,12 +82,14 @@ struct RoomShareChip: View {
             .accessibilityLabel("What to share")
             HStack {
                 Spacer()
+                // Return puts in what's chosen here. ⌘⇧R, outside the popover, shares the run at the last level.
                 Button(action: put) {
-                    HStack(spacing: 6) { Text("Put in room"); Kbd("⌘⇧R") }
+                    HStack(spacing: 6) { Text("Put in room"); Text("↵").opacity(0.8) }
                 }
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
                 .disabled(choice == .lastAnswer && lastAnswer == nil)
-                .help("Put it in the room now")
+                .help("Put it in the room now. Next time, ⌘⇧R shares the run the same way without opening this.")
             }
         }
         .padding(12)

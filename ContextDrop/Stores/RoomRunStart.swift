@@ -19,23 +19,29 @@ enum RoomRunStart {
     /// it and its text, plus the files of each selected chat. Files in `localFileIDs` go with the prompt as
     /// attachments; the others are named as not attached, on the Mac that holds them.
     static func prompt(question: String, sources: [RoomTile], localFileIDs: Set<UUID>) -> String {
+        build(question: question, sources: sources, localFileIDs: localFileIDs).text
+    }
+
+    /// The prompt, and the ids of the files it names as attached (in order). Only those may go with it, so the
+    /// agent is never given a file the prompt doesn't introduce.
+    static func build(question: String, sources: [RoomTile], localFileIDs: Set<UUID>) -> (text: String, attachedFileIDs: [UUID]) {
         let question = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(RoomLimits.maxQuestionLength))
         let context = contextBlock(sources.prefix(RoomLimits.maxSpawnSources), localFileIDs: localFileIDs)
-        guard let context else { return question }
+        guard let context else { return (question, []) }
 
         var text = question.isEmpty ? context.text : question + "\n\n" + context.text
-        if !context.attached.isEmpty {
+        if !context.attachedIDs.isEmpty {
             text += "\n\n" + RoomRunInbox.untrustedFiles(from: "people in the room")
         }
-        return text
+        return (text, context.attachedIDs)
     }
 
     // MARK: Context
 
     private struct Context {
         var text: String
-        /// Names of the files that go with the prompt.
-        var attached: [String]
+        /// The files that go with the prompt.
+        var attachedIDs: [UUID]
     }
 
     private static func contextBlock(_ sources: ArraySlice<RoomTile>, localFileIDs: Set<UUID>) -> Context? {
@@ -45,28 +51,30 @@ enum RoomRunStart {
         var remaining = maxContextLength
         var filesLeft = maxListedFiles
         var parts: [String] = []
-        var attached: [String] = []
+        var attachedIDs: [UUID] = []
         var leftOut = 0
         var listed = Set<UUID>()
 
         for tile in sources {
             let header = "[\(label(of: tile))]"
             var fileLines: [String] = []
+            var tileFiles: [UUID] = []
+            var tileAttached: [UUID] = []
             // A chat spawned from another shares its files; each is listed once.
-            for file in tile.chat?.files ?? [] where !listed.contains(file.id) {
-                guard filesLeft > 0 else { break }
-                filesLeft -= 1
-                listed.insert(file.id)
+            for file in tile.chat?.files ?? [] where !listed.contains(file.id) && !tileFiles.contains(file.id) {
+                guard tileFiles.count < filesLeft else { break }
+                tileFiles.append(file.id)
                 let name = String(file.name.prefix(RoomLimits.maxFileNameLength))
                 if localFileIDs.contains(file.id) {
                     fileLines.append("- \(name): attached")
-                    attached.append(name)
+                    tileAttached.append(file.id)
                 } else {
                     fileLines.append("- \(name): not attached (on \(tile.ownerName)'s Mac)")
                 }
             }
             let files = fileLines.isEmpty ? "" : "\nFiles:\n" + fileLines.joined(separator: "\n")
             let fixed = header.count + files.count + 2
+            // A tile left out uses no file slots, and its files aren't attached.
             guard remaining - fixed > 0 else {
                 leftOut += 1
                 continue
@@ -77,6 +85,9 @@ enum RoomRunStart {
             let part = header + (excerpt.isEmpty ? "" : "\n" + excerpt) + files
             remaining -= part.count + 2
             parts.append(part)
+            filesLeft -= tileFiles.count
+            listed.formUnion(tileFiles)
+            attachedIDs += tileAttached
         }
         guard !parts.isEmpty else { return nil }
         if leftOut > 0 {
@@ -92,12 +103,13 @@ enum RoomRunStart {
         \(defused(parts.joined(separator: "\n\n")))
         </room-context>
         """
-        return Context(text: text, attached: attached)
+        return Context(text: text, attachedIDs: attachedIDs)
     }
 
-    /// Room text can't close the markers early and pass itself off as something I wrote.
+    /// Room text can't close the markers early (in any spelling) and pass itself off as something I wrote:
+    /// every angle bracket in it becomes a look-alike that isn't markup.
     private static func defused(_ text: String) -> String {
-        text.replacingOccurrences(of: "room-context>", with: "room-context)", options: .caseInsensitive)
+        text.replacingOccurrences(of: "<", with: "‹").replacingOccurrences(of: ">", with: "›")
     }
 
     /// What kind of tile it is and who is behind it, e.g. "Note by Bob" or "Chat “Pricing”, run by Alice".

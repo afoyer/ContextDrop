@@ -36,13 +36,29 @@ extension RoomStore {
             spot = freeSpot(near: CGPoint(x: right + 70, y: top))
         }
 
-        let files = heldFiles(of: sources)
-        let text = RoomRunStart.prompt(question: question, sources: sources, localFileIDs: Set(files.map(\.fileID)))
+        // The prompt decides which files it names as attached; only those are copied and given to the agent.
+        let held = Set(heldFileIDs(of: sources))
+        var built = RoomRunStart.build(question: question, sources: sources, localFileIDs: held)
+        var attachments: [Attachment] = []
+        var copied = Set<UUID>()
+        for fileID in built.attachedFileIDs {
+            guard let file = sources.compactMap(\.chat).flatMap(\.files).first(where: { $0.id == fileID }),
+                  let source = engine.localCopy(of: fileID),
+                  let attachment = Self.attachmentCopy(of: source, name: file.name) else { continue }
+            attachments.append(attachment)
+            copied.insert(fileID)
+        }
+        // A copy failed: name that file as not attached instead.
+        if copied.count < built.attachedFileIDs.count {
+            built = RoomRunStart.build(question: question, sources: sources, localFileIDs: copied)
+        }
 
         let id = chats.newConversation(provider: provider)
         chats.setFolder(folder, for: id)
         chats.setPermissionLevel(level, for: id)
-        chats.ask(text, attachments: files.map(\.attachment), in: id)
+        // Room content was written by other people (or their models), so this first answer runs at most at
+        // "Ask before editing": every edit or command comes back to me, as with someone else's follow-up.
+        chats.ask(built.text, attachments: attachments, levelCap: sources.isEmpty ? nil : .ask, in: id)
 
         guard let conversation = chats.conversation(id), let tileID = shareRun(conversation) else {
             notice = "The run started on your Mac, but it couldn’t be put in the room. Share it from its tab."
@@ -52,23 +68,11 @@ extension RoomStore {
         return tileID
     }
 
-    /// Files of the selected chats that this Mac already holds, copied into the Attachments folder (which the
-    /// agents may read) under their own names, the way `RoomRunInbox` keeps a follow-up's files. Each copy
-    /// belongs to the run's chat from then on, so leaving the room doesn't delete it.
-    private func heldFiles(of sources: [RoomTile]) -> [(fileID: UUID, attachment: Attachment)] {
-        var held: [(fileID: UUID, attachment: Attachment)] = []
-        // The same files, in the same order, that the prompt lists (so every attached file is named in it).
-        var seen = Set<UUID>()
-        for chat in sources.compactMap(\.chat) {
-            for file in chat.files where !seen.contains(file.id) {
-                guard seen.count < RoomRunStart.maxListedFiles else { return held }
-                seen.insert(file.id)
-                guard let source = engine.localCopy(of: file.id), FileManager.default.fileExists(atPath: source.path),
-                      let attachment = Self.attachmentCopy(of: source, name: file.name) else { continue }
-                held.append((file.id, attachment))
-            }
+    /// Files of the selected chats that this Mac holds a copy of, so they can go with the prompt.
+    private func heldFileIDs(of sources: [RoomTile]) -> [UUID] {
+        sources.compactMap(\.chat).flatMap(\.files).map(\.id).filter { fileID in
+            engine.localCopy(of: fileID).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         }
-        return held
     }
 
     /// Copies a file into its own folder in the Attachments folder (the same place `RoomRunInbox` keeps a

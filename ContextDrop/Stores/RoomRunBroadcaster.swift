@@ -19,6 +19,9 @@ final class RoomRunBroadcaster {
         /// later carries on the same numbering and watchers stitch it to what they saw before.
         var log: [RunLogLine] = []
         var nextSeq = 0
+        /// The first log line the room may see: lines numbered while the log was private stay private when the
+        /// owner turns it on later.
+        var logFrom = 0
         var lastLineID: UUID?
         /// The previous command read a .env file, so its output is all values.
         var envOutput = false
@@ -54,8 +57,11 @@ final class RoomRunBroadcaster {
 
     /// Changes how much of a run the room sees, and sends the change at once.
     func setLevel(_ level: RunShareLevel, forConversation conversationID: UUID) {
-        guard let tileID = tileID(for: conversationID), tracked[tileID]?.level != level else { return }
-        tracked[tileID]?.level = level
+        guard let tileID = tileID(for: conversationID), var entry = tracked[tileID], entry.level != level else { return }
+        entry.level = level
+        // Turned on mid-run: show what happens from now, not what was printed while it was private.
+        if level == .withLog { entry.logFrom = entry.nextSeq }
+        tracked[tileID] = entry
         tick()
     }
 
@@ -79,7 +85,9 @@ final class RoomRunBroadcaster {
         for tileID in Array(tracked.keys) {
             guard var entry = tracked[tileID] else { continue }
             guard let built = build(&entry) else { continue }
-            let run = Self.applying(entry.level, to: built)
+            var run = Self.applying(entry.level, to: built)
+            let from = entry.logFrom
+            run.log.removeAll { $0.seq < from }
             if run != entry.last {
                 entry.last = run
                 store.post(.runUpdate(tileID, run))

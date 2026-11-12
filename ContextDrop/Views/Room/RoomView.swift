@@ -571,7 +571,7 @@ struct RoomView: View {
     /// The run provider the ask bar is set to, if it can still start one here.
     private func activeRunProvider(_ providers: [(kind: ProviderKind, status: ProviderStatus)]) -> ProviderKind? {
         guard let provider = askDestination.provider else { return nil }
-        return providers.contains { $0.kind == provider && $0.status.isUsable } ? provider : nil
+        return providers.contains { $0.kind == provider && $0.status.isReady } ? provider : nil
     }
 
     private func selectionHint(empty: Bool, run: Bool) -> String {

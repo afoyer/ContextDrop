@@ -54,8 +54,8 @@ struct RoomAskDestinationMenu: View {
             option(.chat, detail: "Answers in a new chat tile")
             if !providers.isEmpty { Divider() }
             ForEach(providers, id: \.kind) { provider in
-                option(.run(provider.kind), detail: provider.status.isUsable ? "Runs in a folder on your Mac" : provider.status.detail)
-                    .disabled(!provider.status.isUsable)
+                option(.run(provider.kind), detail: provider.status.isReady ? "Runs in a folder on your Mac" : provider.status.detail)
+                    .disabled(!provider.status.isReady)
             }
         } label: {
             HStack(spacing: 4) {

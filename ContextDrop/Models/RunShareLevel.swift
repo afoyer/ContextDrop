@@ -18,7 +18,7 @@ enum RunShareLevel: String, CaseIterable, Sendable, Identifiable {
 
     var detail: String {
         switch self {
-        case .steps: "Steps and changed files"
+        case .steps: "Steps, changed files, what it’s waiting on and its final answer"
         case .withLog: "Also the latest log lines. Secrets are hidden."
         }
     }
