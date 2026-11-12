@@ -107,6 +107,9 @@ final class PanelModel {
 
     /// Folder chosen with "/name" on home before typing the question.
     var homeFolder: FolderShortcut?
+    /// What the next coding-agent chat from home may do without asking (chip / ⇧Tab). Kept until quit;
+    /// each launch starts from the Settings default.
+    var homeLevel = AppDefaults.permissionLevel
     /// True while the system screenshot UI is up (the panel is hidden meanwhile).
     var isCapturing = false
     /// Deep chats show the agent's terminal in a pane to the right of the chat (⌘T).
@@ -159,9 +162,6 @@ final class PanelModel {
         guard showTerminal, case .chat(let id) = mode, let conversation = store.conversation(id) else { return false }
         return conversation.provider.isDeep
     }
-
-    /// Extra width added on the right only (the chat column doesn't move when the terminal opens).
-    var rightExtension: CGFloat { terminalVisible ? Self.terminalWidth : 0 }
 
     /// The conversation shown in the panel, if any.
     var panelConversationID: UUID? { if case .chat(let id) = mode { id } else { nil } }
@@ -405,7 +405,7 @@ final class PanelModel {
         input.focusedMessageID = target
     }
 
-    /// ⌘⇧R: put the focused (or latest) answer in the room. For a Claude Code chat, the run itself goes in.
+    /// ⌘⇧R: put the focused (or latest) answer in the room. For a Claude Code or Codex chat, the run itself goes in.
     func sendFocusedToRoom(in id: UUID) {
         guard roomActive, let conversation = store.conversation(id) else { return }
         if conversation.provider.roomShare == .liveRun {
@@ -448,6 +448,16 @@ final class PanelModel {
             if !provider.isDeep { homeFolder = nil }
         }
         focusToken += 1
+    }
+
+    /// ⇧Tab: the next permission level, on home (nil) or in a chat (from its next message).
+    func cyclePermissionLevel(in id: UUID?) {
+        if let id {
+            guard let conversation = store.conversation(id), conversation.provider.isDeep else { return }
+            store.setPermissionLevel(conversation.permissionLevel.next, for: id)
+        } else {
+            homeLevel = homeLevel.next
+        }
     }
 
     /// Auto: OpenAI picks quick answer vs. coding agent for each new chat.

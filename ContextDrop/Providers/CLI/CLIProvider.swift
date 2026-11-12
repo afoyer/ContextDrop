@@ -28,6 +28,7 @@ struct CLIProvider: ChatProvider {
             systemAppend: context.isEmpty ? nil : context.joined(separator: "\n\n"),
             level: request.level,
             images: (contextImages + request.attachments).filter(\.isImage).map(\.path),
+            filesInAttachments: files.contains { $0.link == nil && Attachments.contains($0.path) },
             delegate: request.delegate
         )
         return CLIRunner.run(agent, run, handle: handle)

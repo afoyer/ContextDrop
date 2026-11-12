@@ -190,7 +190,7 @@ struct RoomView: View {
     }
 
     private func faces(_ members: [RoomMember]) -> some View {
-        // A green ring: this person's Claude Code run is working right now. Orange: it is waiting on them.
+        // A green ring: this person's coding-agent run is working right now. Orange: it is waiting on them.
         var ring: [String: Color] = [:]
         for tile in store.liveRuns {
             guard let run = tile.run else { continue }
@@ -217,7 +217,7 @@ struct RoomView: View {
         }
         .help(members.map { member in
             var text = member.isHost ? "\(member.name) (host)" : member.name
-            if ring[member.id] != nil { text += " · running Claude Code" }
+            if ring[member.id] != nil { text += " · running an agent" }
             return text
         }.joined(separator: ", "))
         .accessibilityElement(children: .ignore)
@@ -225,7 +225,7 @@ struct RoomView: View {
     }
 
     /// Everything that can go in the room, in one place: a new chat or thought, or one of this Mac's own
-    /// Claude Code runs and OpenAI chats.
+    /// Claude Code or Codex runs and OpenAI chats.
     private var addMenu: some View {
         let mine = (store.chats?.conversations ?? [])
             .filter { !$0.messages.isEmpty }
@@ -237,9 +237,9 @@ struct RoomView: View {
                 if let id = store.addChatTile(title: "New chat") { show(id) }
             }
             Button("New Thought", systemImage: "square.and.pencil", action: newThought)
-            Section("Your Claude Code runs") {
+            Section("Your Claude Code and Codex runs") {
                 if runs.isEmpty {
-                    Text("No Claude Code chats on this Mac yet")
+                    Text("No Claude Code or Codex chats on this Mac yet")
                 } else {
                     ForEach(runs) { conversation in
                         let shared = store.runs.tileID(for: conversation.id).flatMap(store.tile) != nil
@@ -266,7 +266,7 @@ struct RoomView: View {
         }
         .menuStyle(.button)
         .fixedSize()
-        .help("Add a chat, a thought, or one of your Claude Code runs to the room")
+        .help("Add a chat, a thought, or one of your Claude Code or Codex runs to the room")
     }
 
     /// Selects a tile that was just added and brings it into view.

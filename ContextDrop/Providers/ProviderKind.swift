@@ -80,7 +80,7 @@ enum ProviderKind: String, Codable, CaseIterable, Sendable, Identifiable {
     enum RoomShare: Sendable {
         /// Can't go in a room yet.
         case none
-        /// A watch-only tile that follows the run on its owner's Mac.
+        /// A live tile that follows the run on its owner's Mac; people in the room can send follow-ups to continue it.
         case liveRun
         /// A copy of the chat that anyone in the room can reply in.
         case chatCopy
@@ -90,7 +90,7 @@ enum ProviderKind: String, Codable, CaseIterable, Sendable, Identifiable {
         switch self {
         case .openAI: .chatCopy
         case .claudeCode: .liveRun
-        case .codex: .none
+        case .codex: .liveRun
         }
     }
 }

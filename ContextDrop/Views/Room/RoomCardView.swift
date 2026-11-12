@@ -222,7 +222,7 @@ extension RoomTile {
             case .done: state = "done"
             case .failed: state = "stopped with an error"
             }
-            return "Claude Code run “\(run.title)” on \(run.ownerName)’s Mac, \(state)"
+            return "\(run.agent) run “\(run.title)” on \(run.ownerName)’s Mac, \(state)"
         }
     }
 }

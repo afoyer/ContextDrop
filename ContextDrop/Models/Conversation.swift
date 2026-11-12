@@ -16,9 +16,10 @@ struct ToolStep: Codable, Hashable, Identifiable, Sendable {
     var agentID: String?
 }
 
-/// How much a coding agent may do in a chat without asking.
+/// How much a coding agent may do in a chat without asking. Declared in cycle order (⇧Tab, the menus).
 enum PermissionLevel: String, Codable, CaseIterable, Sendable, Identifiable {
-    case readOnly, ask, acceptEdits
+    /// `auto` is the agent's own reviewed mode: Claude Code's `--permission-mode auto`, Codex's auto review.
+    case readOnly, ask, acceptEdits, auto
 
     var id: String { rawValue }
 
@@ -27,6 +28,7 @@ enum PermissionLevel: String, Codable, CaseIterable, Sendable, Identifiable {
         case .readOnly: "Read-only"
         case .ask: "Ask before editing"
         case .acceptEdits: "Edits allowed"
+        case .auto: "Auto-approve"
         }
     }
 
@@ -35,16 +37,42 @@ enum PermissionLevel: String, Codable, CaseIterable, Sendable, Identifiable {
         case .readOnly: "Never edits files or runs commands that change things"
         case .ask: "Asks you before edits and commands that change things"
         case .acceptEdits: "Edits files in the folder without asking; still asks for commands"
+        case .auto: "Edits and runs commands without asking; a safety check still stops risky ones"
         }
     }
 
-    /// Short form for the Activity pane chip.
+    /// Short form for the Activity pane chip and the composer chip.
     var chip: String {
         switch self {
         case .readOnly: "read-only"
         case .ask: "asks first"
         case .acceptEdits: "edits allowed"
+        case .auto: "auto"
         }
+    }
+
+    var icon: String {
+        switch self {
+        case .readOnly: "lock"
+        case .ask: "hand.raised"
+        case .acceptEdits: "pencil"
+        case .auto: "bolt"
+        }
+    }
+
+    /// May change files without asking (tinted in the UI).
+    var changesWithoutAsking: Bool { self == .acceptEdits || self == .auto }
+
+    /// This level, or `cap` when that allows less (levels are listed from least to most allowed).
+    func capped(at cap: PermissionLevel) -> PermissionLevel {
+        let all = Self.allCases
+        return all.firstIndex(of: self)! <= all.firstIndex(of: cap)! ? self : cap
+    }
+
+    /// The next level in the ⇧Tab cycle, wrapping around.
+    var next: PermissionLevel {
+        let all = Self.allCases
+        return all[(all.firstIndex(of: self)! + 1) % all.count]
     }
 }
 

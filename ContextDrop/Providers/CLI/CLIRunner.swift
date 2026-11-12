@@ -16,6 +16,9 @@ enum CLIRunner {
         var level: PermissionLevel
         /// Image files to show the agent with this prompt (screenshots). Must live in `Attachments.directory`.
         var images: [String] = []
+        /// Some of the non-image files the prompt lists live in `Attachments.directory` (pasted text, files sent
+        /// with a room follow-up), so the agent needs that folder too.
+        var filesInAttachments = false
         /// The other coding CLI is installed and the user lets this agent hand side tasks to it.
         var delegate = false
     }

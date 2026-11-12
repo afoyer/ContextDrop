@@ -183,7 +183,7 @@ struct SlashItem: Identifiable, Equatable {
                 SlashItem(token: $0, title: "/\($0)", subtitle: provider.slashSubtitle, icon: provider.isDeep ? "terminal" : "bubble.left")
             }
         }
-        if autoAvailable { commands.append(SlashItem(token: "auto", title: "/auto", subtitle: "Let OpenAI pick quick answer or Claude Code", icon: "sparkles")) }
+        if autoAvailable { commands.append(SlashItem(token: "auto", title: "/auto", subtitle: "Pick a quick answer or your preferred coding CLI", icon: "sparkles")) }
         commands.append(SlashItem(token: "add", title: "/add", subtitle: "Add a folder shortcut…", icon: "folder.badge.plus"))
         // Skills are matched on description too; commands only by name.
         return items + commands.filter { $0.token.hasPrefix(q) && !items.map(\.token).contains($0.token) }

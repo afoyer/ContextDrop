@@ -35,9 +35,11 @@ struct ClaudeCodeAgent: CLIAgent {
         case .readOnly: args += ["--permission-mode", "dontAsk"]
         case .ask: args += ["--permission-prompt-tool", "stdio", "--permission-mode", "manual"]
         case .acceptEdits: args += ["--permission-prompt-tool", "stdio", "--permission-mode", "acceptEdits"]
+        // Claude's own safety check decides; anything it escalates still reaches us on stdio.
+        case .auto: args += ["--permission-prompt-tool", "stdio", "--permission-mode", "auto"]
         }
         args += ["--allowedTools"] + Self.readOnlyTools + (request.delegate ? ["Bash(\(Self.codexDelegatePrefix):*)"] : [])
-        if !request.images.isEmpty { args += ["--add-dir", Attachments.directory.path] }
+        if !request.images.isEmpty || request.filesInAttachments { args += ["--add-dir", Attachments.directory.path] }
         if let id = request.sessionID { args += ["--resume", id] }
         if let system = request.systemAppend, !system.isEmpty { args += ["--append-system-prompt", system] }
         return args
@@ -94,6 +96,8 @@ struct ClaudeCodeParser: CLIParser {
     private var subagentIDs: Set<String> = []
     private var pendingEdits: [String: (tool: String, input: [String: Any], before: String?)] = [:]
     private var unsupportedRequests: [String] = []
+    /// Tool + summary of requests already put to the user live (their denials are the user's own answer).
+    private var askedLive: Set<String> = []
 
     init(folder: String, level: PermissionLevel = .ask) {
         self.folder = folder
@@ -147,6 +151,7 @@ struct ClaudeCodeParser: CLIParser {
                 events.append(.log(.info, "? waiting on you: \(question.title)", agent: agent))
             } else {
                 let permission = permissionRequest(id: requestID, tool: tool, input: input, data: inputData, live: true)
+                askedLive.insert(permission.tool + permission.summary)
                 events.append(.permissionRequest(permission))
                 events.append(.log(.info, "? needs your OK: \(tool) \(permission.summary)", agent: agent))
             }
@@ -283,17 +288,18 @@ struct ClaudeCodeParser: CLIParser {
             let isError = o["is_error"] as? Bool == true
             events.append(.log(.result, String(format: "%@ in %.1fs · %d turn(s)", isError ? "failed" : "done",
                                                seconds, o["num_turns"] as? Int ?? 0)))
-            // Read-only chats: what was refused becomes a card the user can act on.
+            // Read-only chats, and what auto mode's safety check refused: a card the user can act on.
             var seen: Set<String> = []
             for denial in o["permission_denials"] as? [[String: Any]] ?? [] {
                 let tool = denial["tool_name"] as? String ?? ""
                 let input = denial["tool_input"] as? [String: Any] ?? [:]
                 events.append(.log(.info, "refused: \(tool) \(CLIText.describe(input))"))
-                guard level == .readOnly, !tool.isEmpty, tool != "AskUserQuestion" else { continue }
+                guard level == .readOnly || level == .auto, !tool.isEmpty, tool != "AskUserQuestion" else { continue }
                 let data = (try? JSONSerialization.data(withJSONObject: input)) ?? Data()
                 let request = permissionRequest(id: denial["tool_use_id"] as? String ?? UUID().uuidString,
                                                 tool: tool, input: input, data: data, live: false)
-                guard seen.insert(request.tool + request.summary).inserted else { continue }
+                guard !askedLive.contains(request.tool + request.summary),
+                      seen.insert(request.tool + request.summary).inserted else { continue }
                 events.append(.permissionRequest(request))
             }
             let subtype = o["subtype"] as? String ?? "success"

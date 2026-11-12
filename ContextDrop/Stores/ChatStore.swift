@@ -151,10 +151,13 @@ final class ChatStore {
         answerPendingQuestion(id)
     }
 
-    func ask(_ rawText: String, attachments: [Attachment] = [], skills: [String] = [], in id: UUID) {
+    /// `levelCap` limits this one answer to at most that permission level, whatever the chat is set to
+    /// (a room follow-up from someone else). The chat's own setting is left as it is.
+    func ask(_ rawText: String, attachments: [Attachment] = [], skills: [String] = [], levelCap: PermissionLevel? = nil, in id: UUID) {
         guard let text = appendQuestion(rawText, attachments: attachments, skills: skills, in: id), let conversation = conversation(id) else { return }
         if conversation.provider.isDeep && conversation.folder == nil { return } // answered once a folder is chosen
-        startAnswer(in: id, prompt: text, images: attachments, provider: conversation.provider)
+        startAnswer(in: id, prompt: text, images: attachments, provider: conversation.provider,
+                    level: levelCap.map { conversation.permissionLevel.capped(at: $0) })
     }
 
     /// Adds the user's message (titling a new chat). Returns the text actually asked, or nil if there is nothing to ask.
@@ -223,9 +226,9 @@ final class ChatStore {
     var autoAvailable: Bool { status(.openAI).isUsable }
     var autoActive: Bool { autoRoute && autoAvailable }
 
-    /// The coding agent Auto (or a folder shortcut) uses: the default one if deep and ready, else Claude Code, else Codex.
+    /// The separately configured coding CLI, falling back to another ready CLI.
     func preferredDeepProvider() -> ProviderKind? {
-        let preferred = AppDefaults.provider
+        let preferred = AppDefaults.preferredCLI
         if preferred.isDeep, status(preferred).isReady { return preferred }
         return ProviderKind.deep.first { status($0).isReady }
     }
@@ -242,19 +245,26 @@ final class ChatStore {
         await OpenAISettings.preload()
         refreshProviderStatus()
 
-        let deep = preferredDeepProvider()
-        let question = text + (attachments.isEmpty ? "" : "\n[\(attachments.count) screenshot(s) attached]")
+        let availableCLIs = ProviderKind.deep.filter { status($0).isReady }
+        let question = text + (attachments.isEmpty ? "" : "\n[Attached: \(attachments.map(\.name).joined(separator: ", "))]")
         var decision = await AutoRouter(apiKey: OpenAISettings.apiKey() ?? "").decide(
-            question: question, codeAvailable: deep != nil, shortcuts: folders.shortcuts,
-            defaultFolder: (AppDefaults.folder ?? AppDefaults.lastFolder).map(FolderDrop.display))
+            question: question, availableCLIs: availableCLIs, preferredCLI: AppDefaults.preferredCLI,
+            shortcuts: folders.shortcuts,
+            defaultFolder: (AppDefaults.folder ?? AppDefaults.lastFolder).map(FolderDrop.display),
+            selectedFolder: conversation(id)?.folder.map(FolderDrop.display),
+            workPreferences: AppDefaults.routeCLIByTask ? AppDefaults.cliWorkPreferences : nil)
         guard routingTokens[id] == token, conversation(id) != nil else { return false }
         routingTokens[id] = nil
 
         var folder: URL?
+        let deep = status(decision.provider).isReady && decision.provider.isDeep ? decision.provider : preferredDeepProvider()
         if decision.route == .code, let deep {
             decision.provider = deep
-            folder = decision.folder.flatMap { folders.shortcut(named: $0) }.flatMap { $0.exists ? $0.url : nil }
-                ?? conversation(id)?.folder ?? AppDefaults.folder ?? AppDefaults.lastFolder
+            // An explicitly selected folder wins. A missing named folder must not silently use a different project.
+            let namedFolder = decision.folder.flatMap { folders.shortcut(named: $0) }
+            folder = conversation(id)?.folder
+                ?? namedFolder.flatMap { $0.exists ? $0.url : nil }
+                ?? (namedFolder == nil ? (AppDefaults.folder ?? AppDefaults.lastFolder) : nil)
         } else {
             decision.route = .quick
             decision.provider = .openAI

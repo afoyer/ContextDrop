@@ -25,11 +25,10 @@ final class FirstClickHostingView<Content: View>: NSHostingView<Content> {
 final class FloatingPanel: NSPanel {
     var onEscape: (() -> Void)?
     var onResignKey: (() -> Void)?
-    /// Top-center anchor, so content changes grow the panel downward and widen it symmetrically.
+    /// Top-center anchor, so content changes grow the panel downward and widen it symmetrically
+    /// (the activity pane included: the expanded panel stays centered).
     var anchorTop: CGFloat = 0
     var anchorMidX: CGFloat = 0
-    /// Width added on the right only (the terminal pane): the chat column keeps its place.
-    var rightExtension: () -> CGFloat = { 0 }
     /// Tells the content how tall it may get on this screen.
     var onAvailableHeight: ((CGFloat) -> Void)?
     /// Off while the show animation moves the panel itself.
@@ -59,9 +58,8 @@ final class FloatingPanel: NSPanel {
     /// The user dragged the panel: keep it there instead of snapping back on the next resize.
     private func userMoved() {
         guard anchoringEnabled, !placing, anchorTop > 0, isVisible else { return }
-        let extra = min(rightExtension(), frame.width)
         anchorTop = frame.maxY
-        anchorMidX = frame.minX + (frame.width - extra) / 2
+        anchorMidX = frame.midX
         if let visible = (screen ?? NSScreen.main)?.visibleFrame { onAvailableHeight?(max(240, anchorTop - visible.minY - 16)) }
     }
 
@@ -80,10 +78,9 @@ final class FloatingPanel: NSPanel {
         placing = true
         defer { placing = false }
         if anchorTop > 0 && anchoringEnabled {
-            let extra = min(rightExtension(), frame.width)
             frame.origin.y = anchorTop - frame.height
-            frame.origin.x = (anchorMidX - (frame.width - extra) / 2).rounded()
-            // Stay on screen when the pane would run past the right edge.
+            frame.origin.x = (anchorMidX - frame.width / 2).rounded()
+            // Stay on screen when the panel is wider than the room around the anchor.
             let anchor = NSPoint(x: anchorMidX, y: anchorTop - 1)
             if let visible = (NSScreen.screens.first { $0.frame.contains(anchor) } ?? screen)?.visibleFrame {
                 if frame.maxX > visible.maxX - 8 { frame.origin.x = visible.maxX - 8 - frame.width }
@@ -127,7 +124,6 @@ final class QuickChatPanelController {
         hosting.sizingOptions = [.intrinsicContentSize]
         panel.contentView = hosting
         panel.onEscape = { [weak self] in self?.model.escape() }
-        panel.rightExtension = { [weak model] in MainActor.assumeIsolated { model?.rightExtension ?? 0 } }
         panel.onAvailableHeight = { [weak model] height in MainActor.assumeIsolated { model?.maxPanelHeight = height } }
         panel.onResignKey = { [weak self] in
             guard let self, !self.model.keepsOpenOnResign, self.panel.isVisible else { return }

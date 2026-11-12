@@ -105,6 +105,14 @@ final class CLIParserTests: XCTestCase {
         XCTAssertEqual(events.permissions.first?.live, false)
     }
 
+    func testClaudeAutoModeRefusalsBecomeCardsUnlessAlreadyAskedLive() {
+        var parser = claude(.auto)
+        _ = parser.parse(#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push --force"}}}"#)
+        let events = parser.parse(#"{"type":"result","subtype":"success","permission_denials":[{"tool_name":"Bash","tool_use_id":"d1","tool_input":{"command":"git push --force"}},{"tool_name":"Bash","tool_use_id":"d2","tool_input":{"command":"rm -rf ~/old"}}]}"#)
+        XCTAssertEqual(events.permissions.map(\.summary), ["rm -rf ~/old"], "the user already answered the live one")
+        XCTAssertEqual(events.permissions.first?.live, false)
+    }
+
     func testClaudeDenialsAreOnlyLoggedWhenTheChatCanAsk() {
         var parser = claude(.ask)
         let events = parser.parse(#"{"type":"result","subtype":"success","permission_denials":[{"tool_name":"Bash","tool_use_id":"d1","tool_input":{"command":"make"}}]}"#)
@@ -197,6 +205,8 @@ final class CLIParserTests: XCTestCase {
         XCTAssertFalse(args(.readOnly).contains("--permission-prompt-tool"))
         XCTAssertTrue(args(.ask).contains("manual"))
         XCTAssertTrue(args(.acceptEdits).contains("acceptEdits"))
+        XCTAssertTrue(args(.auto).contains("auto"))
+        XCTAssertTrue(args(.auto).contains("--permission-prompt-tool"), "what the safety check escalates still reaches the user")
         XCTAssertFalse(args(.ask).contains("hi"), "the prompt goes in on stdin")
         XCTAssertEqual(args(.ask, session: "s1").suffix(2), ["--resume", "s1"])
     }
@@ -209,6 +219,23 @@ final class CLIParserTests: XCTestCase {
         XCTAssertTrue(args(.acceptEdits).contains("workspace-write"))
         XCTAssertEqual(args(.acceptEdits, session: "t1").prefix(2), ["exec", "resume"])
         XCTAssertEqual(args(.acceptEdits, session: "t1").suffix(3), ["--", "t1", "hi"])
+        XCTAssertFalse(args(.acceptEdits).contains("approvals_reviewer=\"auto_review\""))
+        // Auto: writable sandbox plus Codex's reviewer, also when resuming (no --approve-for-me there).
+        for session in [nil, "t1"] {
+            let auto = args(.auto, session: session)
+            XCTAssertTrue(auto.contains("approvals_reviewer=\"auto_review\""))
+            XCTAssertTrue(auto.contains("approval_policy=\"on-request\""))
+            XCTAssertTrue(auto.contains { $0.contains("workspace-write") })
+            XCTAssertEqual(auto.last, "hi")
+        }
+    }
+
+    func testPermissionLevelsCycleInMenuOrder() {
+        XCTAssertEqual(PermissionLevel.allCases, [.readOnly, .ask, .acceptEdits, .auto])
+        XCTAssertEqual(PermissionLevel.ask.next, .acceptEdits)
+        XCTAssertEqual(PermissionLevel.acceptEdits.next, .auto)
+        XCTAssertEqual(PermissionLevel.auto.next, .readOnly)
+        XCTAssertEqual(PermissionLevel(rawValue: "auto"), .auto, "Settings stores the raw value")
     }
 }
 

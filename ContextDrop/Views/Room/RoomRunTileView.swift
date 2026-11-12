@@ -1,6 +1,9 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
-/// A Claude Code run someone put in the room. Everyone watches; only its owner approves edits or stops it.
+/// A Claude Code or Codex run someone put in the room. Everyone watches; only its owner approves edits or stops it.
+/// Anyone can ask to continue it with a follow-up and files (`RoomRunContinueSheet`); it runs on the owner's Mac,
+/// in the same session, once the owner accepts. The owner's own follow-ups run at once.
 /// Three states: running (the full tile), waiting on its owner (orange, with the reason), done (one line).
 struct RoomRunTileView: View {
     let store: RoomStore
@@ -13,6 +16,11 @@ struct RoomRunTileView: View {
     @State private var asking = false
     @State private var note = ""
     @State private var showSummary = false
+    @State private var continuing = false
+    /// Files dropped on the tile, waiting in the follow-up composer.
+    @State private var droppedFiles: [URL] = []
+    @State private var dropTargeted = false
+    @State private var showAllRequests = false
 
     private var isMine: Bool { run.ownerName == store.localName }
     private var ownerLabel: String { isMine ? "Your Mac" : "\(run.ownerName)’s Mac" }
@@ -36,6 +44,8 @@ struct RoomRunTileView: View {
             }
         }
         .frame(width: RoomMetrics.runWidth)
+        .overlay { if dropTargeted { dropOverlay } }
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted, perform: drop)
         .background(RoomPalette.tile, in: RoundedRectangle(cornerRadius: RoomMetrics.tileRadius, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: RoomMetrics.tileRadius, style: .continuous))
         .overlay {
@@ -49,7 +59,7 @@ struct RoomRunTileView: View {
 
     private func header(showTime: Bool) -> some View {
         HStack(spacing: 8) {
-            RoomKindLabel(text: "Claude Code", color: RoomPalette.labelColor(for: tile))
+            RoomKindLabel(text: run.agent, color: RoomPalette.labelColor(for: tile))
             Text(run.title)
                 .font(.system(size: 13, weight: .semibold))
                 .lineLimit(1)
@@ -102,6 +112,10 @@ struct RoomRunTileView: View {
             if !run.notes.isEmpty {
                 HairlineDivider()
                 notes
+            }
+            if !run.pendingRequests.isEmpty {
+                HairlineDivider()
+                requests
             }
             HairlineDivider()
             footer
@@ -218,13 +232,16 @@ struct RoomRunTileView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(isMine ? "Only you can approve edits or stop this run" : "Only \(run.ownerName) can approve edits or stop this run")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            actions
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                actions
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -232,6 +249,7 @@ struct RoomRunTileView: View {
 
     @ViewBuilder
     private var actions: some View {
+        continueButton
         if isMine {
             if let onOpenOwnRun { Button("Open", action: onOpenOwnRun).controlSize(.small).help("Open this run’s chat to approve edits or stop it") }
         } else {
@@ -269,6 +287,63 @@ struct RoomRunTileView: View {
         asking = false
     }
 
+    // MARK: Continuing the run
+
+    /// Why this Mac can't send a follow-up now, or nil.
+    private var continueBlocker: String? { store.continueBlocker(tile.id) }
+
+    private var continueButton: some View {
+        Button(isMine ? "Continue…" : "Ask to continue…") { continuing = true }
+            .controlSize(.small)
+            .disabled(continueBlocker != nil)
+            .help(continueBlocker ?? (isMine
+                ? "Send \(run.agent) a follow-up in this session, with files if you like"
+                : "Send \(run.ownerName) a follow-up for \(run.agent), with files. It runs on their Mac once they OK it."))
+            .popover(isPresented: $continuing, arrowEdge: .bottom) {
+                RoomRunContinueSheet(store: store, tileID: tile.id, run: run, files: $droppedFiles) { continuing = false }
+            }
+    }
+
+    /// Follow-ups waiting on the owner. The owner runs or dismisses each; everyone else sees who is waiting.
+    /// Oldest first, so the one waiting longest is on top; past four, the rest fold behind "+N more".
+    private var requests: some View {
+        let pending = run.pendingRequests
+        let shown = showAllRequests ? pending : Array(pending.prefix(Self.foldedRequests))
+        return VStack(alignment: .leading, spacing: 8) {
+            section("Follow-ups · \(pending.count) waiting")
+            ForEach(shown) { request in
+                RoomRunRequestRow(store: store, tileID: tile.id, run: run, request: request)
+            }
+            if pending.count > Self.foldedRequests {
+                Button(showAllRequests ? "Show fewer" : "+\(pending.count - Self.foldedRequests) more") { showAllRequests.toggle() }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private static let foldedRequests = 4
+
+    private var dropOverlay: some View {
+        RoomDropOverlay(title: isMine ? "Continue with these files" : "Ask \(run.ownerName) to continue with these files",
+                        detail: isMine ? "They go with your next follow-up" : "They go to \(run.ownerName)’s Mac only")
+    }
+
+    private func drop(_ providers: [NSItemProvider]) -> Bool {
+        guard continueBlocker == nil else { return false }
+        let files = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        guard !files.isEmpty else { return false }
+        Task { @MainActor in
+            let urls = await FileDropDelegate.urls(from: files)
+            guard !urls.isEmpty else { return }
+            droppedFiles = RoomRunContinueSheet.merge(droppedFiles, urls)
+            continuing = true
+        }
+        return true
+    }
+
     // MARK: Waiting on its owner (and collapsed)
 
     private func compact(reason: String?) -> some View {
@@ -289,12 +364,19 @@ struct RoomRunTileView: View {
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     RoomRunChangeCounts(added: run.added, removed: run.removed)
-                    actions
                 }
                 .font(.system(size: 11, design: .monospaced))
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    actions
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
+            if !run.pendingRequests.isEmpty {
+                HairlineDivider()
+                requests
+            }
         }
     }
 
@@ -308,6 +390,16 @@ struct RoomRunTileView: View {
     // MARK: Done
 
     private var finished: some View {
+        VStack(spacing: 0) {
+            finishedRow
+            if !run.pendingRequests.isEmpty {
+                HairlineDivider()
+                requests
+            }
+        }
+    }
+
+    private var finishedRow: some View {
         HStack(spacing: 10) {
             Image(systemName: run.state == .done ? "checkmark" : "exclamationmark.triangle")
                 .font(.system(size: 13, weight: .bold))
@@ -326,6 +418,7 @@ struct RoomRunTileView: View {
             Button("Summary") { showSummary = true }
                 .controlSize(.small)
                 .popover(isPresented: $showSummary, arrowEdge: .bottom) { summaryPopover }
+            continueButton
         }
         .padding(.horizontal, 14)
         .frame(height: 66)
@@ -365,6 +458,205 @@ struct RoomRunTileView: View {
         }
         .frame(width: 360)
         .frame(maxHeight: 380)
+    }
+}
+
+/// One follow-up waiting on the owner: who sent it, what it asks, its files, and (for the owner) Run / Dismiss.
+struct RoomRunRequestRow: View {
+    let store: RoomStore
+    let tileID: UUID
+    let run: RoomRunTile
+    let request: RunRequest
+
+    /// The follow-up text's full height, measured, so the scroll view around it is exactly as tall as it needs.
+    @State private var textHeight: CGFloat = 0
+
+    private var isOwner: Bool { run.ownerName == store.localName }
+
+    var body: some View {
+        // Worked out once per draw; both the hint and the Run button use it.
+        let blocker = isOwner ? store.inbox.blocker(for: tileID) : nil
+        let canRun = request.filesSettled && blocker == nil
+        let ownerHint = request.filesSettled ? (blocker ?? "Runs on your Mac with this chat’s permission level") : "Files on their way…"
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 6) {
+                AvatarView(name: request.from, size: 16)
+                // The owner reads all of it before it runs on their Mac, so it is never cut off: short text
+                // takes its own height, longer text stops at `maxTextHeight` and scrolls.
+                ScrollView {
+                    requestText.background {
+                        GeometryReader { proxy in
+                            Color.clear
+                                .onAppear { textHeight = proxy.size.height }
+                                .onChange(of: proxy.size.height) { _, height in textHeight = height }
+                        }
+                    }
+                }
+                .frame(height: min(max(textHeight, 16), Self.maxTextHeight))
+                .scrollDisabled(textHeight <= Self.maxTextHeight)
+            }
+            ForEach(request.files) { file in
+                HStack(spacing: 5) {
+                    Image(systemName: file.status == .sending ? "arrow.up.circle" : file.isProblem ? "exclamationmark.triangle" : "doc")
+                        .font(.system(size: 10))
+                    Text(file.name).lineLimit(1).truncationMode(.middle)
+                    Text(file.status == .sending ? "on its way" : file.isProblem ? "won’t be included" : ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))
+                        .foregroundStyle(.tertiary)
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(file.isProblem ? AnyShapeStyle(RoomPalette.waitingLabel) : AnyShapeStyle(.secondary))
+                .padding(.leading, 22)
+            }
+            HStack(spacing: 8) {
+                if isOwner {
+                    Text(ownerHint)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Dismiss") { store.dismissRunRequest(request.id, in: tileID) }
+                        .controlSize(.small)
+                    Button("Run") { store.acceptRunRequest(request.id, in: tileID) }
+                        .controlSize(.small)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canRun)
+                        .help(canRun ? "Ask \(run.agent) this in the same session, on your Mac" : ownerHint)
+                } else {
+                    Text("Waiting for \(run.ownerName) to run it")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(8)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private static let maxTextHeight: CGFloat = 140
+
+    private var requestText: some View {
+        Text(request.text.isEmpty ? "\(request.from) sent files" : "\(request.from): \(request.text)")
+            .font(.system(size: 12))
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The follow-up composer: a prompt for the run's agent and files to go with it.
+struct RoomRunContinueSheet: View {
+    let store: RoomStore
+    let tileID: UUID
+    let run: RoomRunTile
+    @Binding var files: [URL]
+    let onDone: () -> Void
+
+    @State private var text = ""
+    @State private var dropTargeted = false
+    @FocusState private var focused: Bool
+
+    private var isMine: Bool { run.ownerName == store.localName }
+    private var blocker: String? { store.continueBlocker(tileID) }
+    private var sendable: Bool {
+        blocker == nil && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty)
+    }
+
+    static func merge(_ current: [URL], _ new: [URL]) -> [URL] {
+        var all = current
+        for url in new where !all.contains(url) { all.append(url) }
+        return Array(all.prefix(RoomLimits.maxFilesPerRequest))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(isMine ? "Continue “\(run.title)”" : "Ask \(run.ownerName) to continue “\(run.title)”")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(2)
+                Text(isMine
+                     ? "\(run.agent) picks up this session on your Mac."
+                     : "\(run.agent) picks up this session on \(run.ownerName)’s Mac once they OK it. Your files go only to their Mac.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            TextField("e.g. Now add tests for the new endpoint", text: $text, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(2...6)
+                .focused($focused)
+                .onSubmit(send)
+            if !files.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(files, id: \.self) { url in
+                        HStack(spacing: 6) {
+                            Image(systemName: Attachments.isImage(url) ? "photo" : "doc")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            Text(url.lastPathComponent)
+                                .font(.system(size: 11.5))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Button {
+                                files.removeAll { $0 == url }
+                            } label: {
+                                Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Remove \(url.lastPathComponent)")
+                        }
+                    }
+                }
+                .padding(8)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+            HStack(spacing: 8) {
+                Button {
+                    files = Self.merge(files, FilePicker.files(prompt: "Add",
+                        message: isMine ? "Files for \(run.agent) to look at in this session."
+                                        : "Files go to \(run.ownerName)’s Mac with your follow-up."))
+                } label: {
+                    Label("Add Files…", systemImage: "paperclip")
+                }
+                .controlSize(.small)
+                .disabled(files.count >= RoomLimits.maxFilesPerRequest)
+                if let blocker {
+                    Text(blocker)
+                        .font(.system(size: 11))
+                        .foregroundStyle(RoomPalette.waitingLabel)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Button(isMine ? "Run" : "Send to \(run.ownerName)", action: send)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!sendable)
+            }
+        }
+        .padding(12)
+        .frame(width: 320)
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6, 5]))
+                    .padding(4)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            Task { @MainActor in files = Self.merge(files, await FileDropDelegate.urls(from: providers)) }
+            return true
+        }
+        .onAppear { focused = true }
+    }
+
+    private func send() {
+        guard sendable, store.continueRun(text, files: files, in: tileID) else { return }
+        text = ""
+        files = []
+        onDone()
     }
 }
 
@@ -427,7 +719,7 @@ struct RoomRunWatchPanel: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(run?.title ?? "Run").font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text(run.map { "Running on \($0.ownerName == store.localName ? "your" : "\($0.ownerName)’s") Mac · watch only" } ?? "This run was removed")
+                    Text(run.map { "\($0.agent) on \($0.ownerName == store.localName ? "your" : "\($0.ownerName)’s") Mac" } ?? "This run was removed")
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 4)

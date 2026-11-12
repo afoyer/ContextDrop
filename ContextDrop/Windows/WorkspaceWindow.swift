@@ -235,7 +235,7 @@ struct WorkspaceView: View {
                     }
                     .controlSize(.small)
                     .help(conversation.provider.roomShare == .liveRun
-                          ? "Put this run in the room. Others can watch; only you approve edits or stop it."
+                          ? "Put this run in the room. Others can watch and ask to continue it; you OK each follow-up."
                           : "Put this chat in the room. Anyone there can reply; it answers from your Mac.")
                 }
                 Button { share(conversation) } label: {

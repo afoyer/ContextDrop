@@ -96,7 +96,7 @@ enum RoomTakeHome {
         switch tile.content {
         case .card(let body): "\(body.kind.label): \(body.text.prefix(60))"
         case .chat(let chat): "Chat: \(chat.title)"
-        case .run(let run): "Claude Code run: \(run.title)"
+        case .run(let run): "\(run.agent) run: \(run.title)"
         }
     }
 

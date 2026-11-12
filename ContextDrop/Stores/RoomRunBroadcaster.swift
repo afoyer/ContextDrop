@@ -1,9 +1,10 @@
 import Foundation
 
-/// The owner's side of run tiles: summarises this Mac's Claude Code runs for the room, about twice a second.
+/// The owner's side of run tiles: summarises this Mac's Claude Code and Codex runs for the room, about twice a second.
 ///
-/// The run itself never leaves this Mac and nobody else can steer it; the room only gets the plan, the current
-/// state, subagents, changed files (names and line counts) and recent log lines, all passed through `SecretMasker`.
+/// The run itself never leaves this Mac; the room only gets the plan, the current state, subagents, changed files
+/// (names and line counts) and recent log lines, all passed through `SecretMasker`. Follow-ups from the room run
+/// only once the owner accepts them (`RoomRunInbox`).
 @MainActor
 final class RoomRunBroadcaster {
     private unowned let store: RoomStore
@@ -97,6 +98,7 @@ final class RoomRunBroadcaster {
         }
 
         var run = RoomRunTile(ownerName: me,
+                              agent: conversation.provider.displayName,
                               title: line(conversation.title),
                               folder: conversation.folder.map { FolderDrop.display($0) } ?? "")
         run.startedAt = terminal.run.startedAt

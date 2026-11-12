@@ -134,6 +134,13 @@ struct HomeView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ImageButtons(model: model)
                     .frame(height: 28)
+                if model.homeAgent != nil {
+                    PermissionLevelMenu(level: model.homeLevel, compact: true,
+                                        help: "What the coding agent may do without asking in this new chat. ⇧Tab cycles.") {
+                        model.homeLevel = $0
+                    }
+                    .frame(height: 28)
+                }
                 ProviderPill(model: model, conversationID: nil)
                     .frame(height: 28)
             }
@@ -253,6 +260,10 @@ struct HomeView: View {
 
     private func handleKey(_ press: KeyPress) -> KeyPress.Result {
         if let result = SlashMenu.handle(press, model: model, session: model.homeSession) { return result }
+        if press.isBackTab {
+            guard model.homeAgent != nil else { return .ignored }
+            model.cyclePermissionLevel(in: nil); return .handled
+        }
         switch press.key {
         case .delete where model.draft.isEmpty && !model.homeSession.skills.isEmpty:
             model.homeSession.skills.removeLast(); return .handled

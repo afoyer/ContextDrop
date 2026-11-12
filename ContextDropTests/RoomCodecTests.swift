@@ -32,6 +32,8 @@ final class RoomCodecTests: XCTestCase {
             .addFile(id, file), .fileStatus(id, fileID: file.id, .ready), .removeFile(id, fileID: file.id, messageID: UUID()),
             .requestFiles(from: id, to: other),
             .attachRun(other, to: id, messageID: UUID()), .runUpdate(id, run), .runNote(id, RunNote(id: UUID(), from: "Bob", text: "?")),
+            .runRequest(id, RunRequest(id: UUID(), from: "Bob", text: "go on", files: [file])),
+            .runRequestStatus(id, requestID: other, .accepted),
         ]
         for message in messages {
             XCTAssertEqual(try roundTrip(message).kind, message.kind)
@@ -39,14 +41,25 @@ final class RoomCodecTests: XCTestCase {
     }
 
     func testMissingPayloadIsRefused() throws {
-        let data = Data(#"{"version":2,"kind":"moveTile","tileID":"\#(UUID().uuidString)"}"#.utf8)
+        let v = RoomMessage.currentVersion
+        let data = Data(#"{"version":\#(v),"kind":"moveTile","tileID":"\#(UUID().uuidString)"}"#.utf8)
         XCTAssertThrowsError(try RoomCodec.decode(data))
-        XCTAssertNoThrow(try RoomCodec.decode(Data(#"{"version":2,"kind":"removeTile","tileID":"\#(UUID().uuidString)"}"#.utf8)))
+        XCTAssertNoThrow(try RoomCodec.decode(Data(#"{"version":\#(v),"kind":"removeTile","tileID":"\#(UUID().uuidString)"}"#.utf8)))
+        XCTAssertThrowsError(try RoomCodec.decode(Data(#"{"version":\#(v),"kind":"runRequestStatus","tileID":"\#(UUID().uuidString)"}"#.utf8)))
     }
 
     func testOtherVersionsAreRefused() throws {
         let data = Data(#"{"version":\#(RoomMessage.currentVersion + 1),"kind":"removeTile","tileID":"\#(UUID().uuidString)"}"#.utf8)
         XCTAssertThrowsError(try RoomCodec.decode(data))
+    }
+
+    func testARunRequestKeepsItsFilesAndIsCutDown() throws {
+        let files = (0..<12).map { RoomFile(id: UUID(), name: "f\($0).txt", kind: .text, size: 1, addedBy: "Bob", thumbnail: nil, status: .sending) }
+        let request = RunRequest(id: UUID(), from: "Bob", text: String(repeating: "x", count: RoomLimits.maxQuestionLength + 50), files: files)
+        guard case .runRequest(_, let decoded) = try roundTrip(.runRequest(UUID(), request)) else { return XCTFail("wrong kind") }
+        XCTAssertEqual(decoded.text.count, RoomLimits.maxQuestionLength)
+        XCTAssertEqual(decoded.files.map(\.id), Array(files.prefix(RoomLimits.maxFilesPerRequest)).map(\.id))
+        XCTAssertEqual(decoded.status, .pending)
     }
 
     func testGarbageIsRefused() {

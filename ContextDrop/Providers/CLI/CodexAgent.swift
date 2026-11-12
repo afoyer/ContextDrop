@@ -4,6 +4,7 @@ import Foundation
 ///
 /// `exec --json -C <dir> --sandbox read-only|workspace-write`. `exec` never asks; a refused patch shows up as a
 /// failed `file_change` item. Allow → `exec resume <thread> -c sandbox_mode="workspace-write"`.
+/// Auto adds `approval_policy="on-request"` + `approvals_reviewer="auto_review"`: Codex's reviewer approves escalations.
 struct CodexAgent: CLIAgent {
     let kind = ProviderKind.codex
     let executableName = "codex"
@@ -20,16 +21,22 @@ struct CodexAgent: CLIAgent {
         if request.sessionID == nil, let system = request.systemAppend, !system.isEmpty {
             prompt = "\(system)\n\n---\n\n\(request.prompt)"
         }
-        let mode = request.level == .acceptEdits ? "workspace-write" : "read-only"
+        let writable = request.level.changesWithoutAsking
+        let mode = writable ? "workspace-write" : "read-only"
         // `-i` takes several values, so the prompt goes after `--`.
-        let images = request.images.flatMap { ["-i", $0] }
-        // Reaching Claude Code from inside Codex's sandbox needs the network; only with edits allowed.
-        let network = request.delegate && request.level == .acceptEdits ? ["-c", "sandbox_workspace_write.network_access=true"] : []
+        let images: [String] = request.images.flatMap { ["-i", $0] }
+        // Reaching Claude Code from inside Codex's sandbox needs the network; only with a writable sandbox.
+        let network: [String] = request.delegate && writable ? ["-c", "sandbox_workspace_write.network_access=true"] : []
+        // Auto: what `--approve-for-me` sets, spelled as config because `exec resume` has no such flag.
+        let review: [String] = request.level == .auto
+            ? ["-c", "approval_policy=\"on-request\"", "-c", "approvals_reviewer=\"auto_review\""] : []
+        let options: [String] = review + network + images
         if let id = request.sessionID {
-            let args = ["exec", "resume", "--json", "--skip-git-repo-check", "-c", "sandbox_mode=\"\(mode)\""] + network
-            return args + images + ["--", id, prompt]
+            let args: [String] = ["exec", "resume", "--json", "--skip-git-repo-check", "-c", "sandbox_mode=\"\(mode)\""]
+            return args + options + ["--", id, prompt]
         }
-        return ["exec", "--json", "-C", request.folder.path, "--skip-git-repo-check", "--sandbox", mode] + network + images + ["--", prompt]
+        let args: [String] = ["exec", "--json", "-C", request.folder.path, "--skip-git-repo-check", "--sandbox", mode]
+        return args + options + ["--", prompt]
     }
 
     /// Codex should use its own sign-in, not a key the app happened to inherit.
@@ -43,7 +50,7 @@ struct CodexAgent: CLIAgent {
 
     func delegateInstructions(level: PermissionLevel) -> String? {
         // Claude Code needs the network and its sign-in, which Codex's read-only sandbox blocks.
-        guard level == .acceptEdits else { return nil }
+        guard level.changesWithoutAsking else { return nil }
         return """
         You can hand self-contained, read-only side tasks to Claude Code, another coding agent on this Mac, to save your own context: broad code searches, reading and summarising many files, a second opinion on a diff. Run it from the shell, exactly in this form (allow up to 10 minutes): claude -p "<a complete, standalone task that says what to report back>" --permission-mode dontAsk --allowedTools Read,Grep,Glob,LS
         Claude Code starts with no knowledge of this conversation and cannot edit files there. Use it only when it saves real work, check what it reports before relying on it, and do the editing yourself.

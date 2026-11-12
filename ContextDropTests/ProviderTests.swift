@@ -42,8 +42,20 @@ final class ProviderTests: XCTestCase {
         XCTAssertNotNil(ClaudeCodeAgent().delegateInstructions(level: .readOnly))
         XCTAssertNil(CodexAgent().delegateInstructions(level: .ask), "Codex's read-only sandbox can't reach Claude Code")
         XCTAssertNotNil(CodexAgent().delegateInstructions(level: .acceptEdits))
+        XCTAssertNotNil(CodexAgent().delegateInstructions(level: .auto))
         let request = CLIRunner.Request(folder: URL(fileURLWithPath: "/p"), prompt: "hi", level: .ask, delegate: true)
         XCTAssertTrue(ClaudeCodeAgent().arguments(for: request).contains("Bash(\(ClaudeCodeAgent.codexDelegatePrefix):*)"))
+    }
+
+    func testClaudeCanReadFilesKeptInTheAttachmentsFolder() {
+        let base = CLIRunner.Request(folder: URL(fileURLWithPath: "/p"), prompt: "hi", level: .readOnly)
+        XCTAssertFalse(ClaudeCodeAgent().arguments(for: base).contains("--add-dir"))
+        var withFile = base
+        withFile.filesInAttachments = true
+        XCTAssertTrue(ClaudeCodeAgent().arguments(for: withFile).contains("--add-dir"))
+        XCTAssertTrue(Attachments.contains(Attachments.directory.appendingPathComponent("Room/x/notes.pdf").path))
+        XCTAssertFalse(Attachments.contains("/tmp/notes.pdf"))
+        XCTAssertFalse(Attachments.contains(Attachments.directory.path + "-other/notes.pdf"))
     }
 
     func testCLIPromptListsLinksAndFiles() {
