@@ -15,18 +15,36 @@ struct ReceivedShare: Identifiable, Equatable {
 @Observable
 final class ChatStore {
     let peers: PeerService
+    var notices: NoticeCenter { peers.notices }
+    let folders = FolderShortcutStore()
+    /// Auto mode for new chats (see `askAuto`). Picking a provider by hand turns it off.
+    var autoRoute = AppDefaults.autoRoute {
+        didSet { AppDefaults.autoRoute = autoRoute }
+    }
 
     private(set) var conversations: [Conversation] = []
     private(set) var received: [ReceivedShare] = []
-    var defaultProvider: ProviderKind = .openRouter
+    var defaultProvider: ProviderKind = AppDefaults.provider
     private(set) var providerStatus: [ProviderKind: ProviderStatus] = [:]
     private(set) var runningConversationIDs: Set<UUID> = []
     /// Deep-chat terminal pane per conversation (CLI telemetry, never part of the answer).
     private(set) var terminals: [UUID: TerminalState] = [:]
     private(set) var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    /// Chats whose answer finished while nobody was looking at them (green dot).
+    private(set) var finishedUnseen: Set<UUID> = []
+    /// Chats on screen right now (panel or selected tab); they never count as unseen.
+    @ObservationIgnored var visibleConversations: () -> Set<UUID> = { [] }
+    /// A chat started waiting for the user (permission or question). Used for the menu bar and notifications.
+    @ObservationIgnored var onNeedsYou: ((UUID, String) -> Void)?
+    /// Anything the menu bar shows changed (runs, requests, shares).
+    @ObservationIgnored var onActivityChanged: (() -> Void)?
 
+    /// Empty chats that must survive (they are open as tabs).
+    @ObservationIgnored var keepEmptyConversations: () -> Set<UUID> = { [] }
     @ObservationIgnored private var runningTasks: [UUID: Task<Void, Never>] = [:]
-    @ObservationIgnored private var cliHandles: [UUID: CLIRunner.Handle] = [:]
+    @ObservationIgnored private var handles: [UUID: RunHandle] = [:]
+    @ObservationIgnored private var routingTokens: [UUID: UUID] = [:]
+    @ObservationIgnored private var retryApprovals: [UUID: PermissionRequest] = [:]
 
     init(peers: PeerService) {
         self.peers = peers
@@ -46,6 +64,43 @@ final class ChatStore {
     }
 
     func isRunning(_ id: UUID) -> Bool { runningConversationIDs.contains(id) }
+
+    /// What a tab's dot shows: orange beats spinning, spinning beats green.
+    func tabState(_ id: UUID) -> TabState {
+        if conversation(id)?.needsUser == true { return .needsYou }
+        if isRunning(id) { return .running }
+        return finishedUnseen.contains(id) ? .finishedUnseen : .idle
+    }
+
+    func markSeen(_ id: UUID) {
+        if finishedUnseen.remove(id) != nil { onActivityChanged?() }
+    }
+
+    var conversationsNeedingYou: [Conversation] { conversations.filter(\.needsUser) }
+    var runningConversations: [Conversation] { conversations.filter { isRunning($0.id) && !$0.needsUser } }
+
+    func removeConversation(_ id: UUID) {
+        stop(id)
+        conversations.removeAll { $0.id == id }
+        terminals[id] = nil
+        finishedUnseen.remove(id)
+        onActivityChanged?()
+    }
+
+    func setPermissionLevel(_ level: PermissionLevel, for id: UUID) {
+        mutate(id) { $0.permissionLevel = level }
+    }
+
+    func setPinnedSkills(_ skills: [String], for id: UUID) {
+        mutate(id) { $0.pinnedSkills = skills }
+    }
+
+    /// Stops every running agent (the app is quitting).
+    func stopAll() {
+        for handle in handles.values { handle.interrupt() }
+        for task in runningTasks.values { task.cancel() }
+        for id in Array(routingTokens.keys) { stop(id) }
+    }
 
     var recentConversations: [Conversation] {
         conversations.filter { !$0.isEmpty }.sorted { $0.updatedAt > $1.updatedAt }
@@ -67,16 +122,19 @@ final class ChatStore {
 
     @discardableResult
     func newConversation(provider: ProviderKind? = nil, pickedUp: ShareSummary? = nil) -> UUID {
-        // Reuse an untouched empty chat instead of piling them up.
-        conversations.removeAll { $0.isEmpty && $0.pickedUp == nil }
+        // Drop untouched empty chats instead of piling them up (open tabs are kept).
+        let kept = keepEmptyConversations()
+        conversations.removeAll { $0.isEmpty && $0.pickedUp == nil && !kept.contains($0.id) }
         var conversation = Conversation(provider: provider ?? defaultProvider, pickedUp: pickedUp)
         if let pickedUp { conversation.title = pickedUp.title }
         conversations.append(conversation)
         return conversation.id
     }
 
-    func setProvider(_ provider: ProviderKind, for id: UUID) {
-        defaultProvider = provider
+    /// Changes this chat's provider. `asDefault` also makes it the provider new chats start with
+    /// (picked from the menu); slash commands leave the default alone.
+    func setProvider(_ provider: ProviderKind, for id: UUID, asDefault: Bool = false) {
+        if asDefault { defaultProvider = provider }
         mutate(id) { conversation in
             guard conversation.provider != provider else { return }
             conversation.provider = provider
@@ -86,21 +144,43 @@ final class ChatStore {
 
     func setFolder(_ url: URL, for id: UUID) {
         mutate(id) { conversation in
+            if conversation.folder != url { conversation.cliSessionID = nil }
             conversation.folder = url
-            conversation.cliSessionID = nil
         }
+        AppDefaults.lastFolder = url
+        answerPendingQuestion(id)
     }
 
-    func ask(_ rawText: String, in id: UUID) {
-        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let conversation = conversation(id), !isRunning(id) else { return }
+    func ask(_ rawText: String, attachments: [Attachment] = [], skills: [String] = [], in id: UUID) {
+        guard let text = appendQuestion(rawText, attachments: attachments, skills: skills, in: id), let conversation = conversation(id) else { return }
+        if conversation.provider.isDeep && conversation.folder == nil { return } // answered once a folder is chosen
+        startAnswer(in: id, prompt: text, images: attachments, provider: conversation.provider)
+    }
+
+    /// Adds the user's message (titling a new chat). Returns the text actually asked, or nil if there is nothing to ask.
+    @discardableResult
+    func appendQuestion(_ rawText: String, attachments: [Attachment], skills: [String] = [], in id: UUID) -> String? {
+        var text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !attachments.isEmpty, conversation(id) != nil, !isRunning(id) else { return nil }
+        if text.isEmpty {
+            if attachments.isEmpty { return nil }
+            let images = attachments.filter(\.isImage).count
+            let noun = attachments.allSatisfy { $0.link != nil } ? "link" : attachments.allSatisfy { $0.isPastedText == true } ? "pasted text" : "attached file"
+            text = images == 0 ? "Take a look at \(attachments.count == 1 ? "this \(noun)" : "these \(noun)s")."
+                : (attachments.count == 1 ? "What does this screenshot show?" : "What do these screenshots show?")
+        }
+        let question = text
         mutate(id) { conversation in
             if conversation.messages.isEmpty && conversation.pickedUp == nil {
-                conversation.title = Self.title(from: text)
+                conversation.title = Conversation.title(from: question)
             }
-            conversation.messages.append(Message(role: .user, author: "You", text: text))
+            var message = Message(role: .user, author: "You", text: question, attachments: attachments)
+            var all = conversation.pinnedSkills
+            for skill in skills where !all.contains(skill) { all.append(skill) }
+            message.skills = all
+            conversation.messages.append(message)
         }
-        startAnswer(in: id, prompt: text, provider: conversation.provider, allowEdits: false)
+        return text
     }
 
     /// Retries the last failed answer: the user's question was kept.
@@ -109,11 +189,20 @@ final class ChatStore {
               let last = conversation.messages.last, last.role == .assistant, last.error != nil,
               let question = conversation.messages.last(where: { $0.role == .user }) else { return }
         mutate(id) { $0.messages.removeLast() }
-        startAnswer(in: id, prompt: question.text, provider: conversation.provider, allowEdits: false)
+        startAnswer(in: id, prompt: question.text, images: question.attachments, provider: conversation.provider)
     }
 
     func stop(_ id: UUID) {
-        cliHandles[id]?.interrupt()
+        if routingTokens.removeValue(forKey: id) != nil {
+            mutate(id) { conversation in
+                conversation.isRouting = false
+                conversation.messages.append(Message(role: .assistant, author: "Auto", text: "Stopped."))
+            }
+            runningConversationIDs.remove(id)
+            onActivityChanged?()
+        }
+        retryApprovals[id] = nil
+        handles[id]?.interrupt()
         runningTasks[id]?.cancel()
     }
 
@@ -128,149 +217,293 @@ final class ChatStore {
         mutate(id) { if !$0.sharedWith.contains(name) { $0.sharedWith.append(name) } }
     }
 
+    // MARK: Auto routing
+
+    /// Auto needs OpenAI (it makes the decision call).
+    var autoAvailable: Bool { status(.openAI).isUsable }
+    var autoActive: Bool { autoRoute && autoAvailable }
+
+    /// The coding agent Auto (or a folder shortcut) uses: the default one if deep and ready, else Claude Code, else Codex.
+    func preferredDeepProvider() -> ProviderKind? {
+        let preferred = AppDefaults.provider
+        if preferred.isDeep, status(preferred).isReady { return preferred }
+        return ProviderKind.deep.first { status($0).isReady }
+    }
+
+    /// Asks `AutoRouter` where the first question should go, then answers there.
+    /// Returns true if a deep chat still needs a folder (the question waits and is answered once one is chosen).
+    func askAuto(_ rawText: String, attachments: [Attachment], in id: UUID) async -> Bool {
+        guard let text = appendQuestion(rawText, attachments: attachments, in: id) else { return false }
+        let token = UUID()
+        routingTokens[id] = token
+        mutate(id) { $0.isRouting = true }
+        runningConversationIDs.insert(id)
+
+        await OpenAISettings.preload()
+        refreshProviderStatus()
+
+        let deep = preferredDeepProvider()
+        let question = text + (attachments.isEmpty ? "" : "\n[\(attachments.count) screenshot(s) attached]")
+        var decision = await AutoRouter(apiKey: OpenAISettings.apiKey() ?? "").decide(
+            question: question, codeAvailable: deep != nil, shortcuts: folders.shortcuts,
+            defaultFolder: (AppDefaults.folder ?? AppDefaults.lastFolder).map(FolderDrop.display))
+        guard routingTokens[id] == token, conversation(id) != nil else { return false }
+        routingTokens[id] = nil
+
+        var folder: URL?
+        if decision.route == .code, let deep {
+            decision.provider = deep
+            folder = decision.folder.flatMap { folders.shortcut(named: $0) }.flatMap { $0.exists ? $0.url : nil }
+                ?? conversation(id)?.folder ?? AppDefaults.folder ?? AppDefaults.lastFolder
+        } else {
+            decision.route = .quick
+            decision.provider = .openAI
+        }
+        mutate(id) { conversation in
+            conversation.isRouting = false
+            conversation.routedBy = decision
+            if conversation.provider != decision.provider { conversation.provider = decision.provider; conversation.cliSessionID = nil }
+            if let folder { conversation.folder = folder }
+        }
+        runningConversationIDs.remove(id)
+
+        if decision.provider.isDeep && conversation(id)?.folder == nil { return true }
+        if let folder { AppDefaults.lastFolder = folder }
+        startAnswer(in: id, prompt: text, images: attachments, provider: decision.provider)
+        return false
+    }
+
+    /// "Use OpenAI instead": re-answer the routed question as a quick answer.
+    func useQuickAnswer(in id: UUID) {
+        guard let conversation = conversation(id) else { return }
+        stop(id)
+        Task { @MainActor in
+            // Let a stopped run unwind before replacing its answer.
+            while isRunning(id) { try? await Task.sleep(for: .milliseconds(50)) }
+            guard let question = conversation.messages.last(where: { $0.role == .user }) else { return }
+            mutate(id) { c in
+                if let last = c.messages.last, last.role == .assistant { c.messages.removeLast() }
+                c.provider = .openAI
+                c.cliSessionID = nil
+                c.routedBy?.provider = .openAI
+                c.routedBy?.route = .quick
+                c.routedBy?.reason = "switched by you"
+            }
+            startAnswer(in: id, prompt: question.text, images: question.attachments, provider: .openAI)
+        }
+    }
+
+    /// A deep chat whose last question has no answer yet (it was waiting for a folder): answer it now.
+    private func answerPendingQuestion(_ id: UUID) {
+        guard let conversation = conversation(id), conversation.provider.isDeep, conversation.folder != nil, !isRunning(id),
+              let last = conversation.messages.last, last.role == .user else { return }
+        startAnswer(in: id, prompt: last.text, images: last.attachments, provider: conversation.provider)
+    }
+
     // MARK: Answering
 
-    private func startAnswer(in id: UUID, prompt: String, provider: ProviderKind, allowEdits: Bool) {
+    private func startAnswer(in id: UUID, prompt: String, images: [Attachment] = [], provider: ProviderKind, level: PermissionLevel? = nil) {
         let answer = Message(role: .assistant, author: provider.displayName, text: "", isStreaming: true)
+        let skills = conversation(id)?.messages.last(where: { $0.role == .user })?.skills ?? []
         mutate(id) { $0.messages.append(answer) }
         runningConversationIDs.insert(id)
+        finishedUnseen.remove(id)
+        onActivityChanged?()
 
         runningTasks[id] = Task { [weak self] in
             guard let self else { return }
             do {
-                switch provider {
-                case .openRouter:
-                    try await self.runOpenRouter(id, answerID: answer.id)
-                case .claudeCode, .codex:
-                    try await self.runCLI(id, answerID: answer.id, prompt: prompt, provider: provider, allowEdits: allowEdits)
-                }
+                try await self.run(provider, in: id, answerID: answer.id, prompt: prompt, attachments: images, skills: skills, level: level)
                 self.mutateMessage(id, answer.id) { message in
                     message.isStreaming = false
-                    if message.text.isEmpty && message.steps.isEmpty && message.editRequests.isEmpty {
+                    if message.text.isEmpty && message.steps.isEmpty && message.permissions.isEmpty && message.changes.isEmpty {
                         message.text = Task.isCancelled ? "Stopped." : "(No answer.)"
                     }
                 }
+                self.terminals[id]?.finishRun(Task.isCancelled ? .stopped : .finished)
             } catch {
-                let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
+                let cancelled = error.isCancellation
+                self.terminals[id]?.finishRun(cancelled ? .stopped : .failed)
+                if !cancelled, provider.isDeep {
+                    self.terminals[id, default: TerminalState()].append(.error, error.userMessage)
+                }
                 self.mutateMessage(id, answer.id) { message in
                     message.isStreaming = false
                     if cancelled {
                         if message.text.isEmpty { message.text = "Stopped." }
                     } else {
-                        message.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                        message.error = error.userMessage
+                        message.failure = (error as? ProviderError)?.failure ?? (provider.isDeep ? .agentStopped : .noResponse)
                     }
                 }
             }
+            self.mutateMessage(id, answer.id) { $0.settle() }
             self.runningConversationIDs.remove(id)
             self.runningTasks[id] = nil
-            self.cliHandles[id] = nil
+            self.handles[id] = nil
+            self.retryApprovals[id] = nil
+            if !self.visibleConversations().contains(id) { self.finishedUnseen.insert(id) }
+            self.onActivityChanged?()
         }
     }
 
-    private static let baseSystemPrompt = """
-    You are ContextDrop, a concise assistant summoned from a floating panel on a Mac. \
-    Answer directly and briefly; use short paragraphs or lists. Plain text with light Markdown only.
-    """
-
-    private func runOpenRouter(_ id: UUID, answerID: UUID) async throws {
-        let client = try OpenRouterClient.fromSettings()
+    /// Runs one answer with the chat's provider and applies what it streams back.
+    private func run(_ kind: ProviderKind, in id: UUID, answerID: UUID, prompt: String, attachments: [Attachment], skills: [String],
+                     level override: PermissionLevel?) async throws {
         guard let conversation = conversation(id) else { return }
-        var system = Self.baseSystemPrompt
-        if let picked = conversation.pickedUp { system += "\n\n" + picked.contextPrompt() }
-        var turns = [ChatTurn(role: "system", content: system)]
-        for message in conversation.messages where message.id != answerID && message.error == nil && !message.text.isEmpty {
-            turns.append(ChatTurn(role: message.role == .user ? "user" : "assistant", content: message.text))
-        }
-        // Batch deltas so SwiftUI re-renders ~20×/s, not per token.
-        var buffer = ""
-        var lastFlush = Date.distantPast
-        for try await delta in client.stream(turns) {
-            buffer += delta
-            if Date().timeIntervalSince(lastFlush) > 0.05 {
-                let chunk = buffer
-                buffer = ""
-                lastFlush = Date()
-                mutateMessage(id, answerID) { $0.text += chunk }
+        if kind.isDeep, conversation.folder == nil { throw ProviderError.noFolder }
+        if !status(kind).isReady { refreshProviderStatus() }
+        let level = override ?? conversation.permissionLevel
+        let handle = RunHandle()
+        handles[id] = handle
+        // Delegation needs the setting and the other CLI ready.
+        let delegate = AppDefaults.delegateAgents && kind.delegatePartner.map { status($0).isReady } == true
+        let request = ProviderRequest(conversation: conversation, prompt: prompt, attachments: attachments, skills: skills,
+                                      level: level, delegate: delegate)
+        if kind.isDeep { terminals[id, default: TerminalState()].beginRun(level: level) }
+
+        var text = TextBatcher()
+        for try await event in Providers[kind].run(request, handle: handle) {
+            if case .text(let delta) = event {
+                if let chunk = text.add(delta) { apply(.text(chunk), conversationID: id, answerID: answerID) }
+                continue
             }
-        }
-        if !buffer.isEmpty { mutateMessage(id, answerID) { $0.text += buffer } }
-    }
-
-    private func runCLI(_ id: UUID, answerID: UUID, prompt: String, provider: ProviderKind, allowEdits: Bool) async throws {
-        guard let conversation = conversation(id) else { return }
-        guard let folder = conversation.folder else { throw ProviderError.noFolder }
-        let handle = CLIRunner.Handle()
-        cliHandles[id] = handle
-        let request = CLIRunner.Request(
-            kind: provider,
-            folder: folder,
-            prompt: prompt,
-            sessionID: conversation.cliSessionID,
-            systemAppend: conversation.pickedUp?.contextPrompt(),
-            allowEdits: allowEdits
-        )
-        for try await event in CLIRunner.run(request, handle: handle) {
+            if let rest = text.flush() { apply(.text(rest), conversationID: id, answerID: answerID) }
             apply(event, conversationID: id, answerID: answerID)
         }
+        if let rest = text.flush() { apply(.text(rest), conversationID: id, answerID: answerID) }
     }
 
     private func apply(_ event: ProviderEvent, conversationID id: UUID, answerID: UUID) {
-        switch event {
-        case .session(let sessionID):
-            mutate(id) { $0.cliSessionID = sessionID }
-        case .text(let text):
-            mutateMessage(id, answerID) { $0.text += text }
-        case .textBlockBreak:
-            mutateMessage(id, answerID) { if !$0.text.isEmpty { $0.text += "\n\n" } }
-        case .step(let step):
-            mutateMessage(id, answerID) { message in
-                if let i = message.steps.firstIndex(where: { $0.id == step.id }) { message.steps[i] = step } else { message.steps.append(step) }
-            }
-        case .stepFinished(let stepID, let failed):
-            mutateMessage(id, answerID) { message in
-                guard let i = message.steps.firstIndex(where: { $0.id == stepID }) else { return }
-                message.steps[i].done = true
-                // A refused edit is shown as an Allow card, not as a failure.
-                message.steps[i].failed = failed && message.steps[i].kind != .edit
-                if failed && message.steps[i].kind == .edit { message.steps[i].label = "Wants to edit" }
-            }
-        case .editRequest(let request):
-            mutateMessage(id, answerID) { message in
-                if !message.editRequests.contains(where: { $0.id == request.id }) { message.editRequests.append(request) }
-            }
-        case .editsBlocked:
-            mutateMessage(id, answerID) { message in
-                guard !message.editRequests.contains(where: { $0.id == "codex-edits" }) else { return }
-                message.editRequests.append(EditRequest(id: "codex-edits", filePath: "files in this folder", oldText: "", newText: ""))
-            }
-        case .log(let kind, let text):
-            terminals[id, default: TerminalState()].append(kind, text)
-        case .runInfo(let patch):
-            terminals[id, default: TerminalState()].run.apply(patch)
+        if case .permissionRequest(let request) = event, answerOnUsersBehalf(request, in: id) { return }
+        if !event.isTelemetry {
+            var effect = ReducerEffect()
+            mutate(id) { effect = $0.apply(event, answerID: answerID) }
+            if let title = effect.needsYou { onNeedsYou?(id, title) }
+            if effect.activityChanged { onActivityChanged?() }
         }
+        if event.concernsTerminal { terminals[id, default: TerminalState()].apply(event) }
     }
 
-    /// The user approved the agent's proposed edits: resume the same CLI session with edit permission.
-    func allowEdits(messageID: UUID, in id: UUID) {
-        guard let conversation = conversation(id), conversation.provider.isDeep, !isRunning(id),
-              let message = conversation.messages.first(where: { $0.id == messageID }) else { return }
-        let files = Set(message.editRequests.map(\.fileName)).sorted().joined(separator: ", ")
-        mutateMessage(id, messageID) { message in
-            for i in message.editRequests.indices { message.editRequests[i].status = .allowed }
+    /// A live request the user already answered: the edit they approved for this retry, or a rule they always allow in this chat.
+    private func answerOnUsersBehalf(_ request: PermissionRequest, in id: UUID) -> Bool {
+        guard request.live else { return false }
+        let note: String
+        if let approved = retryApprovals[id], approved.tool == request.tool, Self.sameInput(approved.input, request.input) {
+            retryApprovals[id] = nil
+            note = "allowed approved retry: \(request.tool) \(request.summary.prefix(120))"
+        } else if conversation(id)?.alwaysAllowed.contains(request.rule) == true {
+            note = "allowed automatically (\(request.ruleLabel) are always allowed in this chat)"
+        } else {
+            return false
         }
-        let prompt = "The user approved your proposed edits (\(files)). Apply exactly those changes now, then confirm in one sentence."
-        mutate(id) { $0.messages.append(Message(role: .user, author: "You", text: "Allow edits to \(files)")) }
-        startAnswer(in: id, prompt: prompt, provider: conversation.provider, allowEdits: true)
+        handles[id]?.respond(requestID: request.id, allow: true, input: request.input)
+        terminals[id, default: TerminalState()].append(.info, note)
+        return true
+    }
+
+    func clearTerminal(_ id: UUID) {
+        guard var terminal = terminals[id] else { return }
+        terminal.lines.removeAll()
+        terminal.rawLines.removeAll()
+        terminals[id] = terminal
+    }
+
+    // MARK: Permissions and questions
+
+    private func locate(_ requestID: String, in id: UUID) -> (message: Message, request: PermissionRequest)? {
+        guard let conversation = conversation(id) else { return nil }
+        for message in conversation.messages.reversed() {
+            if let request = message.permissions.first(where: { $0.id == requestID }) { return (message, request) }
+        }
+        return nil
+    }
+
+    private static func sameInput(_ a: Data, _ b: Data) -> Bool {
+        guard let left = (try? JSONSerialization.jsonObject(with: a)) as? NSDictionary,
+              let right = (try? JSONSerialization.jsonObject(with: b)) as? NSDictionary else { return false }
+        return left.isEqual(right)
+    }
+
+    /// Allow what the agent asked for. `always` also allows the same kind of request for the rest of this chat.
+    func allow(_ requestID: String, in id: UUID, always: Bool = false) {
+        guard let (message, request) = locate(requestID, in: id), request.status == .pending else { return }
+        if request.live {
+            guard let handle = handles[id] else { return }
+            if always { mutate(id) { $0.alwaysAllowed.insert(request.rule) } }
+            handle.respond(requestID: request.id, allow: true, input: request.input)
+            mutateMessage(id, message.id) { message in
+                if let i = message.permissions.firstIndex(where: { $0.id == requestID }) { message.permissions[i].status = .allowed }
+                // Also answer other waiting requests the new rule covers.
+                guard always else { return }
+                for i in message.permissions.indices where message.permissions[i].status == .pending
+                    && message.permissions[i].live && message.permissions[i].rule == request.rule {
+                    handle.respond(requestID: message.permissions[i].id, allow: true, input: message.permissions[i].input)
+                    message.permissions[i].status = .allowed
+                }
+            }
+            terminals[id, default: TerminalState()].append(.result, "allowed: \(request.tool) \(request.summary.prefix(120))")
+            onActivityChanged?()
+            return
+        }
+        // The call was refused during a run that couldn't ask: run again, this time able to ask or edit.
+        let what = request.isEdit ? (request.fileName.isEmpty ? request.summary : request.fileName) : "\(request.tool) \(request.summary)"
+        guard let conversation = conversation(id), !isRunning(id),
+              let retry = Providers[conversation.provider].retry(afterApproving: what) else { return }
+        if always { mutate(id) { $0.alwaysAllowed.insert(request.rule) } }
+        mutateMessage(id, message.id) { message in
+            if let i = message.permissions.firstIndex(where: { $0.id == requestID }) { message.permissions[i].status = .allowed }
+        }
+        mutate(id) { $0.messages.append(Message(role: .user, author: "You", text: "Allow: \(what)")) }
+        if retry.asksAgain && !always { retryApprovals[id] = request }
+        startAnswer(in: id, prompt: retry.prompt, provider: conversation.provider, level: retry.level)
+    }
+
+    func deny(_ requestID: String, in id: UUID, reason: String? = nil) {
+        guard let (message, request) = locate(requestID, in: id), request.status == .pending else { return }
+        if request.live {
+            handles[id]?.respond(requestID: request.id, allow: false,
+                                    message: reason ?? "The user said no to this. Don't retry it; continue another way or explain what you need.")
+            terminals[id, default: TerminalState()].append(.info, "denied: \(request.tool) \(request.summary.prefix(120))")
+        }
+        mutateMessage(id, message.id) { message in
+            if let i = message.permissions.firstIndex(where: { $0.id == requestID }) { message.permissions[i].status = .denied }
+        }
+        onActivityChanged?()
+    }
+
+    /// Answers the current question of a decision card; the agent continues once every question has an answer.
+    func answer(_ questionID: String, with answer: String, in id: UUID) {
+        guard let conversation = conversation(id),
+              let message = conversation.messages.last(where: { $0.questions.contains { $0.id == questionID } }),
+              var question = message.questions.first(where: { $0.id == questionID }), question.status == .pending,
+              let index = question.items.firstIndex(where: { $0.answer == nil }) else { return }
+        let text = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        question.items[index].answer = text
+        if question.current == nil {
+            var input = (try? JSONSerialization.jsonObject(with: question.input)) as? [String: Any] ?? [:]
+            input["answers"] = Dictionary(question.items.map { ($0.question, $0.answer ?? "") }, uniquingKeysWith: { first, _ in first })
+            let data = (try? JSONSerialization.data(withJSONObject: input)) ?? question.input
+            handles[id]?.respond(requestID: question.id, allow: true, input: data)
+            question.status = .answered
+            terminals[id, default: TerminalState()].append(.result, "answered: \(question.items.compactMap(\.answer).joined(separator: " · "))")
+        }
+        let updated = question
+        mutateMessage(id, message.id) { message in
+            if let i = message.questions.firstIndex(where: { $0.id == questionID }) { message.questions[i] = updated }
+        }
+        onActivityChanged?()
     }
 
     // MARK: Providers
 
     func refreshProviderStatus() {
-        providerStatus[.openRouter] = OpenRouterSettings.apiKey() == nil ? .missingKey : .ready("API key · fast, no file access")
-        for kind in [ProviderKind.claudeCode, .codex] {
+        for provider in Providers.all {
+            let kind = provider.kind
             if providerStatus[kind] == nil { providerStatus[kind] = .checking }
             Task { [weak self] in
-                let status = await CLIRunner.status(for: kind)
+                let status = await provider.status()
                 self?.providerStatus[kind] = status
             }
         }
@@ -283,6 +516,7 @@ final class ChatStore {
     func receive(_ share: ShareSummary) {
         guard !received.contains(where: { $0.id == share.id }) else { return }
         received.insert(ReceivedShare(share: share, receivedAt: Date()), at: 0)
+        onActivityChanged?()
     }
 
     /// Opens a new private chat seeded with the share (Continue). Returns the new conversation id.
@@ -293,7 +527,10 @@ final class ChatStore {
             return existing.id
         }
         markRead(share.id)
-        return newConversation(provider: .openRouter, pickedUp: share)
+        let id = newConversation(provider: .openAI, pickedUp: share)
+        let saved = share.sharedImages.compactMap { Attachments.save(jpeg: $0.jpeg, name: $0.name) }
+        if !saved.isEmpty { mutate(id) { $0.pickedUpAttachments = saved } }
+        return id
     }
 
     func markRead(_ shareID: UUID) {
@@ -308,37 +545,10 @@ final class ChatStore {
     func ingestFile(_ url: URL) -> ShareSummary? {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count <= WireCodec.maxPayloadBytes,
               let share = try? ShareSummary.fromFile(data) else {
-            peers.notice = "That .contextdrop file couldn't be read."
+            notices.text = "That .contextdrop file couldn't be read."
             return nil
         }
         receive(share)
         return share
-    }
-
-    // MARK: Building a share
-
-    func buildShare(from prep: SharePrep, conversation: Conversation) -> ShareSummary {
-        ShareSummary(
-            id: UUID(),
-            title: prep.title.isEmpty ? conversation.title : prep.title,
-            senderName: peers.localDisplayName,
-            senderDevice: peers.localDevice,
-            createdAt: Date(),
-            summary: prep.summary.trimmingCharacters(in: .whitespacesAndNewlines),
-            kept: prep.kept,
-            decisions: prep.decisions.filter(\.included).map(\.value),
-            openQuestions: prep.questions.filter(\.included).map(\.value),
-            notes: prep.notes.filter(\.included).map(\.value),
-            fileNames: prep.includeFileNames ? conversation.referencedFileNames : [],
-            transcript: prep.includeTranscript
-                ? conversation.messages.filter { $0.error == nil && !$0.text.isEmpty }.map { TranscriptLine(author: $0.author, text: $0.text) }
-                : nil
-        )
-    }
-
-    static func title(from text: String) -> String {
-        let words = text.split(whereSeparator: \.isWhitespace).prefix(6).joined(separator: " ")
-        let trimmed = words.trimmingCharacters(in: CharacterSet(charactersIn: "?.!,:;"))
-        return trimmed.isEmpty ? "New chat" : trimmed.prefix(1).uppercased() + trimmed.dropFirst()
     }
 }

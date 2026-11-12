@@ -20,7 +20,7 @@ struct SharePrepareView: View {
                 Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 0.5)
                 previewColumn
             }
-            .frame(height: 620)
+            .frame(height: max(320, model.tallLayoutHeight - 110)) // header + footer ≈ 110
             HairlineDivider()
             footer
         }
@@ -41,7 +41,14 @@ struct SharePrepareView: View {
                 .accessibilityLabel("Back to chat")
             Text("Share “\(prep.title)”").font(.system(size: 14, weight: .semibold)).lineLimit(1)
             Spacer()
-            Text("Summary by OpenRouter").font(.system(size: 12)).foregroundStyle(.secondary)
+            Picker("Detail", selection: Binding(get: { prep.detail }, set: { model.setShareDetail($0) })) {
+                ForEach(ShareDetail.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 170)
+            .help("Brief: summary, decisions, questions. Detailed: adds key facts and next steps (⌘D)")
+            Text("Summary by OpenAI").font(.system(size: 12)).foregroundStyle(.secondary)
         }
         .padding(.horizontal, 16)
         .frame(height: 48)
@@ -83,6 +90,16 @@ struct SharePrepareView: View {
                         }
                     }
 
+                    if !prep.facts.isEmpty {
+                        sectionLabel("Key facts")
+                        ForEach(prep.facts) { item in
+                            CheckRow(checked: item.included, focused: prep.focused == .fact(item.id), onToggle: { prep.toggle(.fact(item.id)) }) {
+                                Text(item.value)
+                            }
+                            .id(SharePrep.Row.fact(item.id))
+                        }
+                    }
+
                     if !prep.decisions.isEmpty {
                         sectionLabel("Decisions")
                         ForEach($prep.decisions) { $item in
@@ -90,6 +107,16 @@ struct SharePrepareView: View {
                                 Text(item.value)
                             }
                             .id(SharePrep.Row.decision(item.id))
+                        }
+                    }
+
+                    if !prep.nextSteps.isEmpty {
+                        sectionLabel("Next steps")
+                        ForEach(prep.nextSteps) { item in
+                            CheckRow(checked: item.included, focused: prep.focused == .nextStep(item.id), onToggle: { prep.toggle(.nextStep(item.id)) }) {
+                                Text(item.value)
+                            }
+                            .id(SharePrep.Row.nextStep(item.id))
                         }
                     }
 
@@ -119,6 +146,20 @@ struct SharePrepareView: View {
                     }
                     .font(.system(size: 13))
                     .padding(.horizontal, 10).padding(.vertical, 6)
+
+                    if !prep.screenshots.isEmpty {
+                        sectionLabel("Screenshots")
+                        CheckRow(checked: prep.includeScreenshots, focused: prep.focused == .screenshots,
+                                 trailing: "\(prep.screenshots.count) image\(prep.screenshots.count == 1 ? "" : "s")",
+                                 onToggle: { prep.toggle(.screenshots) }) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                AttachmentStrip(attachments: prep.screenshots, size: 40)
+                                Text(prep.includeScreenshots ? "Sent compressed. Their AI can look at them too." : "Not sent. Check what they show before including them.")
+                                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                            }
+                        }
+                        .id(SharePrep.Row.screenshots)
+                    }
 
                     if !prep.fileNames.isEmpty {
                         sectionLabel("Files")
@@ -151,7 +192,7 @@ struct SharePrepareView: View {
             case .summarizing where prep.summary.isEmpty:
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("OpenRouter is writing the summary…").foregroundStyle(.secondary)
+                    Text(prep.detail == .detailed ? "OpenAI is writing a detailed brief…" : "OpenAI is writing the summary…").foregroundStyle(.secondary)
                 }
                 ThinkingLine(reduceMotion: model.reduceMotion)
             case .failed(let error) where prep.summary.isEmpty && !prep.isEditingSummary:
@@ -177,7 +218,7 @@ struct SharePrepareView: View {
                 Button("Regenerate ⌘R") { model.regenerateSummary() }
                     .disabled(prep.phase == .summarizing)
                 if case .failed = prep.phase {
-                    Button("Settings…") { model.onOpenSettings?() }
+                    Button("Settings…") { model.actions.openSettings() }
                 }
             }
             .buttonStyle(.link)
@@ -211,7 +252,7 @@ struct SharePrepareView: View {
             Text("What they will get").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
             ScrollView {
                 if let conversation {
-                    SharePreviewCard(share: model.store.buildShare(from: prep, conversation: conversation), placeholder: prep.phase == .summarizing)
+                    SharePreviewCard(share: prep.share(of: conversation, from: model.store.peers, id: prep.previewID, createdAt: prep.startedAt), placeholder: prep.phase == .summarizing)
                         .animation(Motion.streaming(model.reduceMotion), value: prep.summary)
                 }
             }
@@ -229,6 +270,7 @@ struct SharePrepareView: View {
         let cmd = press.modifiers.contains(.command)
         if cmd, press.characters == "e" { prep.isEditingSummary.toggle(); return .handled }
         if cmd, press.characters == "r" { model.regenerateSummary(); return .handled }
+        if cmd, press.characters == "d" { model.setShareDetail(prep.detail == .brief ? .detailed : .brief); return .handled }
         if press.key == .escape {
             if focus == .summary || focus == .note { prep.isEditingSummary = false; focus = .list; return .handled }
             model.escape(); return .handled
@@ -316,11 +358,19 @@ struct SharePreviewCard: View {
                     UnevenRoundedRectangle(topLeadingRadius: 8, bottomLeadingRadius: 8).fill(Palette.keptRule).frame(width: 3)
                 }
             }
-            if !share.decisions.isEmpty || !share.openQuestions.isEmpty {
+            if !share.facts.isEmpty || !share.decisions.isEmpty || !share.steps.isEmpty || !share.openQuestions.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
+                    if !share.facts.isEmpty {
+                        Text("Key facts").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                        ForEach(share.facts, id: \.self) { Text("· \($0)").textSelection(.enabled) }
+                    }
                     if !share.decisions.isEmpty {
-                        Text("Decided").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                        Text("Decided").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary).padding(.top, share.facts.isEmpty ? 0 : 4)
                         ForEach(share.decisions, id: \.self) { Text("· \($0)") }
+                    }
+                    if !share.steps.isEmpty {
+                        Text("Next steps").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 4)
+                        ForEach(Array(share.steps.enumerated()), id: \.offset) { i, step in Text("\(i + 1). \(step)") }
                     }
                     if !share.openQuestions.isEmpty {
                         Text("Still open").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 4)
@@ -332,6 +382,7 @@ struct SharePreviewCard: View {
             if !share.notes.isEmpty || !share.fileNames.isEmpty {
                 FlowChips(items: share.notes.map(\.title) + share.fileNames)
             }
+            if !share.sharedImages.isEmpty { SharedImagesRow(images: share.sharedImages) }
             if let transcript = share.transcript {
                 Label("Full conversation · \(transcript.count) messages", systemImage: "text.bubble")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
@@ -368,5 +419,29 @@ struct FlowChips: View {
 extension Array {
     func chunked(into size: Int) -> [[Element]] {
         stride(from: 0, to: count, by: size).map { Array(self[$0..<Swift.min($0 + size, count)]) }
+    }
+}
+
+/// Screenshots inside a share (decoded from the package, so it works before anything is saved).
+struct SharedImagesRow: View {
+    let images: [SharedImage]
+    var height: CGFloat = 56
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(images) { image in
+                    if let nsImage = NSImage(data: image.jpeg) {
+                        Image(nsImage: nsImage).resizable().aspectRatio(contentMode: .fill)
+                            .frame(width: height * 1.4, height: height)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
+                            .help(image.name)
+                            .accessibilityLabel("Screenshot \(image.name)")
+                    }
+                }
+            }
+        }
+        .frame(height: height)
     }
 }

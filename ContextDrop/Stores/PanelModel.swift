@@ -19,7 +19,26 @@ enum HomeItem: Identifiable, Equatable {
     }
 }
 
+/// What the panel asks the rest of the app to do.
+struct PanelActions {
+    var hide: () -> Void = {}
+    var show: () -> Void = {}
+    /// Opens a chat as a tab in the workspace window.
+    var expand: (UUID) -> Void = { _ in }
+    var openSettings: () -> Void = {}
+    var chooseFolder: (UUID) -> Void = { _ in }
+    var captureScreenshot: () -> Void = {}
+    var pickImages: () -> Void = {}
+    var addFolderShortcut: () -> Void = {}
+    var openRoom: () -> Void = {}
+    /// "To room": puts an answer on the table of the room you're in.
+    var sendToRoom: (Message, Conversation) -> Void = { _, _ in }
+    /// "To room" on a whole tab: a Claude Code run becomes a run tile, an OpenAI chat a chat tile.
+    var sendTabToRoom: (Conversation) -> Void = { _ in }
+}
+
 /// What the floating panel is showing, and the keyboard logic behind it.
+/// Attachments and drops, slash commands and the share flow are in the `PanelModel+…` files.
 @MainActor
 @Observable
 final class PanelModel {
@@ -27,45 +46,135 @@ final class PanelModel {
         case home
         case chat(UUID)
         case share(UUID)
+        case shareTabs          // several tabs ticked for one drop (R3 board 4)
         case send(conversationID: UUID, share: ShareSummary)
         case offer(UUID)        // preview of a pending offer from someone nearby
         case received(UUID)     // preview of a share already on this Mac (saved for later / file)
     }
 
     let store: ChatStore
-    var mode: Mode = .home
-    var draft = ""
+    /// Tabs of the workspace window.
+    let workspace = WorkspaceModel()
+    var mode: Mode = .home {
+        // Every chat shown in Quick Chat is a tab too, so the panel and the window share one set of tabs.
+        didSet { if case .chat(let id) = mode, workspace.selected != id || !workspace.tabs.contains(id) { workspace.open(id) } }
+    }
+    /// How far the page is dragged sideways by a tab swipe, in Quick Chat and in the window.
+    var panelSwipe: CGFloat = 0
+    var windowSwipe: CGFloat = 0
+    /// Reduce Motion: the tab a swipe would switch to once it is far enough.
+    var swipeHint: UUID?
+    /// The home input's draft, attachments and "/" state.
+    let homeSession: ChatSession
+    /// One input state per conversation, so the panel and each tab keep their own draft.
+    @ObservationIgnored private var sessions: [UUID: ChatSession] = [:]
+    /// The composer that last had focus (nil = home). Screenshots and picked images go there.
+    var activeComposerID: UUID?
+    /// True when that composer is in the workspace window rather than the panel.
+    var activeComposerInWindow = false
+
+    var draft: String {
+        get { homeSession.draft }
+        set { homeSession.draft = newValue }
+    }
+    var pendingAttachments: [Attachment] {
+        get { homeSession.pendingAttachments }
+        set { homeSession.pendingAttachments = newValue }
+    }
+    var slashSelection: Int {
+        get { homeSession.slashSelection }
+        set { homeSession.slashSelection = newValue }
+    }
     var selection = 0
-    var focusedMessageID: UUID?
     var showProviderMenu = false
+    /// Activity log filter per chat: nil = all, "main", or a subagent id.
+    var activityFilter: [UUID: String] = [:]
     var prep: SharePrep?
+    @ObservationIgnored var summaryTask: Task<Void, Never>?
+    @ObservationIgnored var summaryToken: UUID?
+    /// Several tabs being shared together. (The share flow is in PanelModel+Share.swift.)
+    var multiShare: MultiSharePrep?
+    /// Tabs travelling with the share in `.send` (the first one is the mode's share).
+    @ObservationIgnored var extraShares: [(conversationID: UUID, share: ShareSummary)] = []
     /// Bumped to ask the active input to take focus.
     var focusToken = 0
-    /// Briefly shown after a successful send ("Shared with Camille").
-    var justSharedWith: String?
     var copiedMessageID: UUID?
+    @ObservationIgnored private var clipboardCache: (changeCount: Int, hasText: Bool) = (-1, false)
+    /// Height available below the panel's top on the current screen (set when it's positioned).
+    var maxPanelHeight: CGFloat = 900
+    /// Fixed height of the wide layouts (share checklist, chat + terminal), capped to the screen.
+    var tallLayoutHeight: CGFloat { min(720, maxPanelHeight) }
 
-    // Wired by the AppDelegate.
-    @ObservationIgnored var onHide: (() -> Void)?
-    @ObservationIgnored var onExpand: ((UUID) -> Void)?
-    @ObservationIgnored var onOpenSettings: (() -> Void)?
-    @ObservationIgnored var onChooseFolder: ((UUID) -> Void)?
+    /// Folder chosen with "/name" on home before typing the question.
+    var homeFolder: FolderShortcut?
+    /// True while the system screenshot UI is up (the panel is hidden meanwhile).
+    var isCapturing = false
+    /// Deep chats show the agent's terminal in a pane to the right of the chat (⌘T).
+    var showTerminal = AppDefaults.showTerminal {
+        didSet { AppDefaults.showTerminal = showTerminal }
+    }
+
+    /// What the panel asks the app to do (wired by the AppDelegate and the panel's controller).
+    @ObservationIgnored var actions = PanelActions()
+    /// Whether "To room" is offered (you're in a live room).
+    var roomActive = false
 
     init(store: ChatStore) {
         self.store = store
+        homeSession = ChatSession(conversationID: nil, folders: store.folders)
+    }
+
+    /// The input state of a conversation (created on first use).
+    func session(_ id: UUID?) -> ChatSession {
+        guard let id else { return homeSession }
+        if let existing = sessions[id] { return existing }
+        let created = ChatSession(conversationID: id, folders: store.folders)
+        sessions[id] = created
+        return created
+    }
+
+    var activeSession: ChatSession { session(activeComposerID) }
+
+    /// Remembers where the user is typing.
+    func composerFocused(_ id: UUID?, inWindow: Bool) {
+        activeComposerID = id
+        activeComposerInWindow = inWindow
     }
 
     var peers: PeerService { store.peers }
+    var notices: NoticeCenter { store.notices }
     var reduceMotion: Bool { store.reduceMotion }
 
+    static let chatWidth: CGFloat = 640
+    static let terminalWidth: CGFloat = 460
+    static let tabStripHeight: CGFloat = 39
+
     var isWide: Bool { if case .share = mode { true } else { false } }
-    var width: CGFloat { isWide ? 1040 : 640 }
+    /// Tabs going out with the share being sent.
+    var extraShareCount: Int { extraShares.count }
+    var width: CGFloat { isWide ? 1040 : Self.chatWidth + (terminalVisible ? Self.terminalWidth : 0) }
+
+    /// The terminal pane is shown for deep chats (Claude Code / Codex) in chat mode.
+    var terminalVisible: Bool {
+        guard showTerminal, case .chat(let id) = mode, let conversation = store.conversation(id) else { return false }
+        return conversation.provider.isDeep
+    }
+
+    /// Extra width added on the right only (the chat column doesn't move when the terminal opens).
+    var rightExtension: CGFloat { terminalVisible ? Self.terminalWidth : 0 }
+
+    /// The conversation shown in the panel, if any.
+    var panelConversationID: UUID? { if case .chat(let id) = mode { id } else { nil } }
+
+    func toggleTerminal() {
+        withAnimation(Motion.shareMode(reduceMotion)) { showTerminal.toggle() }
+    }
 
     /// Panel auto-hides when it loses focus, except during flows that open system UI (AirDrop, folder picker).
     var keepsOpenOnResign: Bool {
         switch mode {
-        case .share, .send: true
-        default: false
+        case .share, .send, .shareTabs: true
+        default: isCapturing
         }
     }
 
@@ -86,9 +195,13 @@ final class PanelModel {
         let received = store.received.sorted { !$0.read && $1.read }
         items += received.prefix(4).map { .received($0) }
         items += store.recentConversations.prefix(4).map { .chat($0) }
-        if let clip = NSPasteboard.general.string(forType: .string), !clip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            items.append(.clipboard)
+        // Re-read the clipboard only when it changed (this runs on every render).
+        let pasteboard = NSPasteboard.general
+        if clipboardCache.changeCount != pasteboard.changeCount {
+            let text = pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            clipboardCache = (pasteboard.changeCount, !text.isEmpty)
         }
+        if clipboardCache.hasText { items.append(.clipboard) }
         return items
     }
 
@@ -96,6 +209,8 @@ final class PanelModel {
 
     func summoned() {
         if case .home = mode { selection = 0 }
+        composerFocused(panelConversationID, inWindow: false)
+        SkillCatalog.shared.refresh(projectFolder: panelConversationID.flatMap { store.conversation($0)?.folder } ?? AppDefaults.lastFolder)
         focusToken += 1
     }
 
@@ -104,16 +219,29 @@ final class PanelModel {
         if showProviderMenu { showProviderMenu = false; return }
         switch mode {
         case .home, .chat:
-            onHide?()
+            let current = session(panelConversationID)
+            if current.slashQuery != nil { current.draft = ""; return } // close the / list first
+            actions.hide()
             mode = .home
-            draft = ""
+            homeSession.resetComposer()
+            homeFolder = nil
             selection = 0
         case .share(let id):
             prep = nil
             withAnimation(Motion.shareMode(reduceMotion)) { mode = .chat(id) }
+        case .shareTabs:
+            multiShare?.task?.cancel()
+            multiShare = nil
+            mode = .home
+            actions.hide()
         case .send(let id, _):
             if let outgoing = peers.outgoing, outgoing.phase == .waiting || outgoing.phase == .sending {
-                onHide?() // sending continues in the background
+                actions.hide() // sending continues in the background
+            } else if multiShare != nil {
+                peers.clearOutgoing()
+                extraShares = []
+                multiShare?.phase = .choosing
+                withAnimation(Motion.shareMode(reduceMotion)) { mode = .shareTabs }
             } else {
                 peers.clearOutgoing()
                 withAnimation(Motion.shareMode(reduceMotion)) { mode = .share(id) }
@@ -130,23 +258,58 @@ final class PanelModel {
     func newChat() {
         showProviderMenu = false
         if case .share = mode { prep = nil }
+        if case .shareTabs = mode { multiShare?.task?.cancel(); multiShare = nil }
         if case .send = mode, peers.outgoing.map({ $0.phase != .waiting && $0.phase != .sending }) ?? false { peers.clearOutgoing() }
         withAnimation(Motion.summon(reduceMotion)) { mode = .home }
-        draft = ""
+        homeSession.resetComposer()
         selection = 0
         focusToken += 1
     }
 
-    func submitFromHome() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty {
-            openSelected()
-            return
+    // MARK: Tabs in Quick Chat
+
+    func selectPanelTab(_ id: UUID) {
+        guard store.conversation(id) != nil else { return }
+        showProviderMenu = false
+        mode = .chat(id)
+        composerFocused(id, inWindow: false)
+        session(id).requestFocus()
+        focusToken += 1
+    }
+
+    /// ⌃Tab: the next tab waiting for you, else the next tab (wraps).
+    func cyclePanelTab(backwards: Bool) {
+        guard case .chat(let id) = mode else { return }
+        if !backwards, let waiting = workspace.nextNeedingYou({ store.conversation($0)?.needsUser == true }), waiting != id {
+            selectPanelTab(waiting)
+        } else {
+            stepPanelTab(backwards ? -1 : 1, wraps: true)
         }
-        let id = store.newConversation()
-        draft = ""
-        withAnimation(Motion.resize(reduceMotion)) { mode = .chat(id) }
-        store.ask(text, in: id)
+    }
+
+    func stepPanelTab(_ delta: Int, wraps: Bool = false) {
+        let tabs = workspace.tabs
+        guard case .chat(let id) = mode, let index = tabs.firstIndex(of: id), tabs.count > 1 else { return }
+        var next = index + delta
+        if wraps { next = (next + tabs.count) % tabs.count }
+        if tabs.indices.contains(next) { selectPanelTab(tabs[next]) }
+    }
+
+    /// ⌘W in Quick Chat. A chat that is still working keeps going (menu bar › Brewing).
+    func closePanelTab(_ id: UUID) {
+        let wasCurrent = panelConversationID == id
+        workspace.close(id)
+        if let conversation = store.conversation(id), conversation.isEmpty, conversation.pickedUp == nil { store.removeConversation(id) }
+        guard wasCurrent else { return }
+        if let next = workspace.selected { selectPanelTab(next) } else {
+            withAnimation(Motion.summon(reduceMotion)) { mode = .home }
+            focusToken += 1
+        }
+    }
+
+    /// Opens a conversation as a tab in the workspace window.
+    func openInWorkspace(_ id: UUID) {
+        actions.expand(id)
     }
 
     func moveSelection(_ delta: Int) {
@@ -181,44 +344,78 @@ final class PanelModel {
 
     func openChat(_ id: UUID) {
         withAnimation(Motion.continueOpen(reduceMotion)) { mode = .chat(id) }
-        focusedMessageID = nil
+        session(id).focusedMessageID = nil
+        composerFocused(id, inWindow: false)
+        store.markSeen(id)
         focusToken += 1
     }
 
     // MARK: Chat actions
 
     func submitInChat(_ id: UUID) {
-        let text = draft
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard applySlash(in: id) else { return }
+        let input = session(id)
+        let text = input.draft
         guard let conversation = store.conversation(id) else { return }
-        if conversation.provider.isDeep && conversation.folder == nil {
-            onChooseFolder?(id)
+        // A typed reply answers a pending question ("or type your own answer").
+        if let question = conversation.pendingQuestions.first, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            store.answer(question.id, with: text, in: id)
+            input.draft = ""
             return
         }
-        draft = ""
-        store.ask(text, in: id)
-        focusedMessageID = nil
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !input.pendingAttachments.isEmpty else { return }
+        guard !store.isRunning(id) else { return }
+        let attachments = input.pendingAttachments
+        let skills = input.skills
+        if conversation.provider.isDeep && conversation.folder == nil {
+            if conversation.messages.last?.role == .user {
+                actions.chooseFolder(id)
+                return
+            }
+            input.resetComposer()
+            store.ask(text, attachments: attachments, skills: skills, in: id)
+            actions.chooseFolder(id)
+            return
+        }
+        input.resetComposer()
+        store.ask(text, attachments: attachments, skills: skills, in: id)
+        input.focusedMessageID = nil
     }
 
     /// ↑↓ between answers in a chat.
     func moveAnswerFocus(_ delta: Int, in id: UUID) {
         guard let conversation = store.conversation(id) else { return }
+        let input = session(id)
         let answers = conversation.messages.filter { $0.role == .assistant && $0.error == nil }
         guard !answers.isEmpty else { return }
-        if let current = focusedMessageID, let index = answers.firstIndex(where: { $0.id == current }) {
-            focusedMessageID = answers[max(0, min(answers.count - 1, index + delta))].id
+        if let current = input.focusedMessageID, let index = answers.firstIndex(where: { $0.id == current }) {
+            input.focusedMessageID = answers[max(0, min(answers.count - 1, index + delta))].id
         } else {
-            focusedMessageID = (delta < 0 ? answers.last : answers.first)?.id
+            input.focusedMessageID = (delta < 0 ? answers.last : answers.first)?.id
         }
     }
 
     /// ⌘K keeps the focused answer, or the latest one.
     func keepFocused(in id: UUID) {
         guard let conversation = store.conversation(id) else { return }
-        let target = focusedMessageID ?? conversation.messages.last(where: { $0.role == .assistant && $0.error == nil })?.id
+        let input = session(id)
+        let target = input.focusedMessageID ?? conversation.messages.last(where: { $0.role == .assistant && $0.error == nil })?.id
         guard let target else { return }
         withAnimation(Motion.keep(reduceMotion)) { store.toggleKeep(target, in: id) }
-        focusedMessageID = target
+        input.focusedMessageID = target
+    }
+
+    /// ⌘⇧R: put the focused (or latest) answer in the room. For a Claude Code chat, the run itself goes in.
+    func sendFocusedToRoom(in id: UUID) {
+        guard roomActive, let conversation = store.conversation(id) else { return }
+        if conversation.provider.roomShare == .liveRun {
+            actions.sendTabToRoom(conversation)
+            return
+        }
+        let input = session(id)
+        guard let message = conversation.messages.first(where: { $0.id == input.focusedMessageID })
+                ?? conversation.messages.last(where: { $0.role == .assistant && $0.error == nil && !$0.text.isEmpty }) else { return }
+        actions.sendToRoom(message, conversation)
     }
 
     func copy(_ message: Message) {
@@ -233,85 +430,32 @@ final class PanelModel {
 
     func copyFocused(in id: UUID) {
         guard let conversation = store.conversation(id),
-              let message = conversation.messages.first(where: { $0.id == focusedMessageID })
+              let message = conversation.messages.first(where: { $0.id == session(id).focusedMessageID })
                 ?? conversation.messages.last(where: { $0.role == .assistant && $0.error == nil }) else { return }
         copy(message)
     }
 
     func selectProvider(_ provider: ProviderKind, for id: UUID?) {
         showProviderMenu = false
-        guard store.status(provider).isReady else { return }
+        guard store.status(provider).isUsable else { return }
         if let id {
-            store.setProvider(provider, for: id)
-            if provider.isDeep, store.conversation(id)?.folder == nil { onChooseFolder?(id) }
+            store.setProvider(provider, for: id, asDefault: true)
+            if provider.isDeep, store.conversation(id)?.folder == nil { actions.chooseFolder(id) }
         } else {
             store.defaultProvider = provider
+            store.autoRoute = false
+            AppDefaults.provider = provider
+            if !provider.isDeep { homeFolder = nil }
         }
         focusToken += 1
     }
 
-    // MARK: Share flow
-
-    /// ⌘⇧S: widen to the checklist and ask OpenRouter for the brief while the panel opens.
-    func beginShare(_ id: UUID) {
-        guard let conversation = store.conversation(id), !conversation.messages.isEmpty else { return }
-        let prep = SharePrep(conversation: conversation)
-        self.prep = prep
-        withAnimation(Motion.shareMode(reduceMotion)) { mode = .share(id) }
-        summarize(prep, conversation: conversation)
-    }
-
-    func regenerateSummary() {
-        guard let prep, let conversation = store.conversation(prep.conversationID) else { return }
-        summarize(prep, conversation: conversation)
-    }
-
-    private func summarize(_ prep: SharePrep, conversation: Conversation) {
-        prep.phase = .summarizing
-        Task { @MainActor in
-            do {
-                let draft = try await OpenRouterClient.fromSettings().summarize(conversation)
-                withAnimation(Motion.streaming(reduceMotion)) { prep.apply(draft) }
-            } catch {
-                prep.phase = .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
-                // Still allow a hand-written summary.
-                if prep.summary.isEmpty { prep.isEditingSummary = true }
-            }
-        }
-    }
-
-    func choosePerson() {
-        guard let prep, let conversation = store.conversation(prep.conversationID) else { return }
-        if case .failed = prep.phase, !prep.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { prep.phase = .ready }
-        guard prep.canContinue else { return }
-        let share = store.buildShare(from: prep, conversation: conversation)
-        peers.clearOutgoing()
-        withAnimation(Motion.shareMode(reduceMotion)) { mode = .send(conversationID: conversation.id, share: share) }
-    }
-
-    func send(to peer: NearbyPeer) {
-        guard case .send(_, let share) = mode else { return }
-        withAnimation(Motion.drop(reduceMotion)) { peers.send(share, to: peer.peerID) }
-    }
-
-    /// Called when the transfer is acknowledged: check, haptic, then back to the chat with a badge.
-    func deliveryConfirmed() {
-        guard case .send(let id, _) = mode, let outgoing = peers.outgoing, outgoing.phase == .delivered else { return }
-        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-        store.markShared(id, with: outgoing.peerName)
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1.2))
-            guard case .send(let current, _) = mode, current == id else { return }
-            peers.clearOutgoing()
-            prep = nil
-            justSharedWith = outgoing.peerName
-            withAnimation(Motion.shareMode(reduceMotion)) { mode = .chat(id) }
-            focusToken += 1
-        }
-    }
-
-    func chooseSomeoneElse() {
-        peers.clearOutgoing()
+    /// Auto: OpenAI picks quick answer vs. coding agent for each new chat.
+    func selectAuto() {
+        showProviderMenu = false
+        guard store.autoAvailable else { return }
+        store.autoRoute = true
+        focusToken += 1
     }
 
     // MARK: Receiving
@@ -321,20 +465,26 @@ final class PanelModel {
         if case .offer(offer.id) = mode { withAnimation(Motion.summon(reduceMotion)) { mode = .home } }
     }
 
+    /// Continue opens Quick Chat right away on "Receiving from …"; the chat replaces it when the share lands.
     func accept(_ offer: IncomingOffer, open: Bool) {
         peers.accept(offer, open: open)
+        guard open else { return }
+        peers.markSeen(offer)
+        withAnimation(Motion.summon(reduceMotion)) { mode = .offer(offer.id) }
+        actions.show()
     }
 
     /// A share arrived (Continue) or was opened from a file / the list: start the private continued chat.
     func continueChat(_ share: ShareSummary) {
         let id = store.continueFrom(share)
         draft = ""
+        composerFocused(id, inWindow: false)
         withAnimation(Motion.continueOpen(reduceMotion)) { mode = .chat(id) }
         focusToken += 1
     }
 
     func askSuggested(_ question: String, in id: UUID) {
-        draft = ""
+        session(id).draft = ""
         store.ask(question, in: id)
     }
 }

@@ -29,12 +29,13 @@ struct ShareNotificationView: View {
                 AvatarView(name: offer.senderName, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline) {
-                        Text("\(offer.senderName) shared a chat with you").font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                        Text("\(offer.senderName) shared \(offer.preview.whatWasShared) with you").font(.system(size: 13, weight: .semibold)).lineLimit(1)
                         Spacer()
                         Text("now").font(.system(size: 11)).foregroundStyle(.secondary)
                     }
-                    Text(offer.preview.title).font(.system(size: 13)).italic().lineLimit(1)
-                    Text(offer.preview.countsLine).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(offer.preview.tabTitles?.joined(separator: " · ") ?? offer.preview.title).font(.system(size: 13)).italic().lineLimit(1)
+                    Text(offer.preview.tabCount > 1 ? "Each tab opens as its own private chat" : offer.preview.countsLine)
+                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
             .padding(14)
@@ -44,7 +45,7 @@ struct ShareNotificationView: View {
                 Divider()
                 notificationButton("Preview") { previewing = true }
                 Divider()
-                notificationButton("Continue", primary: true) { model.accept(offer, open: true); onClose() }
+                notificationButton(offer.preview.tabCount > 1 ? "Open as Tabs" : "Continue", primary: true) { model.accept(offer, open: true); onClose() }
             }
             .frame(height: 36)
         }
@@ -52,13 +53,15 @@ struct ShareNotificationView: View {
 
     private var previewBody: some View {
         VStack(spacing: 0) {
-            OfferPreviewContent(preview: offer.preview).padding(16)
+            ScrollView { OfferPreviewContent(preview: offer.preview).padding(16) }
+                .frame(maxHeight: 420)
+                .fixedSize(horizontal: false, vertical: true)
             HairlineDivider()
             HStack(spacing: 8) {
                 Button("Decline") { model.decline(offer); onClose() }
                 Button("Save for Later") { model.accept(offer, open: false); onClose() }
                 Spacer()
-                Button("Continue Chat ↵") { model.accept(offer, open: true); onClose() }
+                Button(offer.preview.tabCount > 1 ? "Open as Tabs ↵" : "Continue Chat ↵") { model.accept(offer, open: true); onClose() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
             }
@@ -90,6 +93,14 @@ struct OfferPreviewContent: View {
                 AvatarView(name: preview.senderName, size: 24)
                 Text(preview.title).font(.system(size: 14, weight: .semibold)).lineLimit(2)
                 Spacer()
+            }
+            if let tabs = preview.tabTitles, tabs.count > 1 {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(tabs.count) tabs").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    ForEach(Array(tabs.enumerated()), id: \.offset) { _, title in
+                        Label(title, systemImage: "rectangle.stack").font(.system(size: 12)).lineLimit(1)
+                    }
+                }
             }
             Text(preview.summary).font(.system(size: 13)).lineSpacing(2).foregroundStyle(.primary.opacity(0.9))
             if !preview.openQuestions.isEmpty {
@@ -129,7 +140,7 @@ struct OfferPreviewView: View {
                     Button("Decline") { model.decline(offer) }
                     Button("Save for Later") { model.accept(offer, open: false) }
                     Spacer()
-                    Button("Continue Chat ↵") { model.accept(offer, open: true) }
+                    Button(offer.preview.tabCount > 1 ? "Open as Tabs ↵" : "Continue Chat ↵") { model.accept(offer, open: true) }
                         .buttonStyle(.borderedProminent)
                 }
             }
@@ -160,7 +171,7 @@ struct ReceivedPreviewView: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView { SharePreviewCard(share: share).padding(18) }
-                .frame(maxHeight: 520)
+                .frame(maxHeight: max(200, min(520, model.maxPanelHeight - 60)))
                 .fixedSize(horizontal: false, vertical: true)
             HairlineDivider()
             HStack(spacing: 8) {
@@ -194,6 +205,7 @@ struct ReceivedPreviewView: View {
 /// Pinned, foldable. Shows the brief, and on request the exact text the AI receives.
 struct PickedUpBlock: View {
     let share: ShareSummary
+    var attachments: [Attachment] = []
     let reduceMotion: Bool
     @State private var expanded = true
     @State private var showExact = false
@@ -229,7 +241,15 @@ struct PickedUpBlock: View {
                                 UnevenRoundedRectangle(topLeadingRadius: 7, bottomLeadingRadius: 7).fill(Palette.keptRule).frame(width: 3)
                             }
                     }
+                    if !share.facts.isEmpty { listRow("Key facts", share.facts) }
                     if !share.decisions.isEmpty { chipRow("Decided", share.decisions) }
+                    if !share.steps.isEmpty { listRow("Next steps", share.steps.enumerated().map { "\($0.offset + 1). \($0.element)" }) }
+                    if !attachments.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Screenshots").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                            AttachmentStrip(attachments: attachments, size: 48)
+                        }
+                    }
                     if !share.notes.isEmpty { chipRow("Notes", share.notes.map(\.title)) }
                     if !share.fileNames.isEmpty { chipRow("Files", share.fileNames) }
                     Button(showExact ? "Hide exact AI context" : "Show exact AI context") { showExact.toggle() }
@@ -252,6 +272,13 @@ struct PickedUpBlock: View {
         .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
+    }
+
+    private func listRow(_ label: String, _ items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+            ForEach(items, id: \.self) { Text(items.first?.first?.isNumber == true ? $0 : "· \($0)").textSelection(.enabled) }
+        }
     }
 
     private func chipRow(_ label: String, _ items: [String]) -> some View {

@@ -8,9 +8,11 @@ struct TerminalLine: Identifiable, Hashable, Sendable {
     let date = Date()
     let kind: Kind
     let text: String
+    /// Subagent this line belongs to (nil = the main agent).
+    var agentID: String?
 }
 
-/// Partial update to a run's status, streamed from CLIRunner. Nil fields leave the current value alone.
+/// Partial update to a run's status, streamed from a provider. Nil fields leave the current value alone.
 struct TerminalRunPatch: Sendable {
     var pid: Int32?
     var model: String?
@@ -23,6 +25,8 @@ struct TerminalRunPatch: Sendable {
     var outputTokens: Int?
     var exitCode: Int32?
     var interrupted: Bool?
+    var lastEventAt: Date?
+    var turnStarted: Bool?
 }
 
 /// Live status of the CLI process behind a deep chat (the latest run).
@@ -32,7 +36,7 @@ struct TerminalRun: Equatable, Sendable {
     var phase: Phase = .idle
     var startedAt: Date?
     var endedAt: Date?
-    var editsAllowed = false
+    var level: PermissionLevel = .ask
     var pid: Int32?
     var model: String?
     var permissionMode: String?
@@ -44,6 +48,8 @@ struct TerminalRun: Equatable, Sendable {
     var outputTokens: Int?
     var exitCode: Int32?
     var interrupted = false
+    var lastEventAt: Date?
+    var turnStarted = false
 
     var isActive: Bool { phase == .starting || phase == .running }
 
@@ -59,17 +65,34 @@ struct TerminalRun: Equatable, Sendable {
         if let v = patch.outputTokens { outputTokens = v }
         if let v = patch.exitCode { exitCode = v }
         if let v = patch.interrupted { interrupted = v }
+        if let v = patch.lastEventAt { lastEventAt = v }
+        if let v = patch.turnStarted { turnStarted = v }
     }
 }
 
 struct TerminalState: Sendable {
     static let maxLines = 800
 
+    static let maxRawLines = 400
+
     var run = TerminalRun()
     var lines: [TerminalLine] = []
+    /// The CLI's JSON lines as they arrived (the "Raw JSON" view).
+    var rawLines: [TerminalLine] = []
+    /// Subagents seen in this chat, newest run last.
+    var subagents: [Subagent] = []
+    /// Files changed in the latest run.
+    var changes: [FileChange] = []
+    /// The agent's own to-do list, when the run keeps one.
+    var plan: [RunPlanStep] = []
 
-    mutating func append(_ kind: TerminalLine.Kind, _ text: String) {
-        lines.append(TerminalLine(kind: kind, text: text))
+    mutating func append(_ kind: TerminalLine.Kind, _ text: String, agent: String? = nil) {
+        lines.append(TerminalLine(kind: kind, text: text, agentID: agent))
         if lines.count > Self.maxLines { lines.removeFirst(lines.count - Self.maxLines) }
+    }
+
+    mutating func appendRaw(_ text: String) {
+        rawLines.append(TerminalLine(kind: .output, text: text.count > 2_000 ? String(text.prefix(2_000)) + "…" : text))
+        if rawLines.count > Self.maxRawLines { rawLines.removeFirst(rawLines.count - Self.maxRawLines) }
     }
 }

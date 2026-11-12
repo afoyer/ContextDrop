@@ -4,9 +4,17 @@ import SwiftUI
 struct QuickChatView: View {
     @Bindable var model: PanelModel
 
+    private var acceptsDrops: Bool {
+        switch model.mode {
+        case .home, .chat: true
+        default: false
+        }
+    }
+
     var body: some View {
         content
             .frame(width: model.width)
+            .fileDropTargets(model: model, conversationID: { [model] in model.panelConversationID }, enabled: acceptsDrops)
             .background(MaterialBackground(material: .hudWindow))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay {
@@ -14,11 +22,21 @@ struct QuickChatView: View {
                     .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
             }
             .animation(Motion.shareMode(model.reduceMotion), value: model.isWide)
+            .animation(Motion.shareMode(model.reduceMotion), value: model.terminalVisible)
             .background {
                 // Panel-wide shortcuts that must work regardless of which control has focus.
                 Group {
-                    Button("Settings") { model.onOpenSettings?() }.keyboardShortcut(",", modifiers: .command)
+                    Button("Settings") { model.actions.openSettings() }.keyboardShortcut(",", modifiers: .command)
                     Button("New chat") { model.newChat() }.keyboardShortcut("n", modifiers: .command)
+                    Button("New tab") { model.newChat() }.keyboardShortcut("t", modifiers: .command)
+                    Button("Close tab") { if let id = model.panelConversationID { model.closePanelTab(id) } else { model.escape() } }
+                        .keyboardShortcut("w", modifiers: .command)
+                    Button("Next tab") { model.stepPanelTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift])
+                    Button("Previous tab") { model.stepPanelTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
+                    Button("Activity") { if model.activeConversationID.flatMap({ model.store.conversation($0) })?.provider.isDeep == true { model.toggleTerminal() } }
+                        .keyboardShortcut("a", modifiers: [.command, .option])
+                    Button("Open a room") { model.actions.openRoom() }
+                        .keyboardShortcut("r", modifiers: [.command, .option])
                 }
                 .opacity(0)
                 .allowsHitTesting(false)
@@ -32,11 +50,38 @@ struct QuickChatView: View {
             HomeView(model: model)
                 .transition(Motion.pop(model.reduceMotion))
         case .chat(let id):
-            ChatView(model: model, conversationID: id, style: .panel)
-                .transition(Motion.pop(model.reduceMotion))
+            VStack(spacing: 0) {
+                // Tabs: the same ones the window shows. ⌘T new · ⌃Tab next · ⌘W close · swipe sideways.
+                TabStrip(model: model, selected: id, compact: true,
+                         onSelect: { model.selectPanelTab($0) }, onNew: { model.newChat() }, onClose: { model.closePanelTab($0) })
+                    .frame(width: PanelModel.chatWidth)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HairlineDivider()
+                HStack(spacing: 0) {
+                    ChatView(model: model, conversationID: id, style: .panel, fillsHeight: model.terminalVisible)
+                        .frame(width: PanelModel.chatWidth)
+                    if model.terminalVisible, let conversation = model.store.conversation(id) {
+                        Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 0.5)
+                        TerminalPane(model: model, conversation: conversation)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .transition(model.reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+                    }
+                }
+                .frame(height: model.terminalVisible ? min(620, model.maxPanelHeight - PanelModel.tabStripHeight) : nil, alignment: .top)
+                .id(id)
+                .modifier(SwipeFeedback(model: model, offset: model.panelSwipe, current: id))
+            }
+            .clipped()
+            .onChange(of: id) { model.slideIn(\.panelSwipe) }
+            .transition(Motion.pop(model.reduceMotion))
         case .share:
             if let prep = model.prep {
                 SharePrepareView(model: model, prep: prep)
+                    .transition(.opacity)
+            }
+        case .shareTabs:
+            if let multi = model.multiShare {
+                ShareTabsView(model: model, multi: multi)
                     .transition(.opacity)
             }
         case .send(let id, let share):
@@ -69,22 +114,59 @@ struct HomeView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 14) {
+            if !model.workspace.tabs.isEmpty {
+                HomeTabBubbles(model: model)
+                HairlineDivider()
+            }
+            HStack(alignment: .top, spacing: 14) {
                 Image(systemName: "drop")
                     .font(.system(size: 20, weight: .regular))
                     .foregroundStyle(Color.accentColor)
-                TextField("Ask anything…", text: $model.draft)
+                    .frame(height: 28)
+                // Wraps and grows (up to 6 lines, then scrolls) so long questions stay visible.
+                TextField("Ask anything…", text: Bindable(model.homeSession).draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(size: 22, weight: .light))
+                    .lineLimit(1...6)
                     .focused($inputFocused)
                     .accessibilityLabel("Ask ContextDrop")
                     .onKeyPress(phases: .down) { press in handleKey(press) }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ImageButtons(model: model)
+                    .frame(height: 28)
                 ProviderPill(model: model, conversationID: nil)
+                    .frame(height: 28)
             }
             .padding(.horizontal, 18)
-            .frame(height: 60)
+            .padding(.vertical, 16)
+            .frame(minHeight: 60)
 
-            if model.draft.isEmpty {
+            if !model.pendingAttachments.isEmpty {
+                AttachmentStrip(attachments: model.pendingAttachments) { model.removeAttachment($0, from: model.homeSession) }
+                    .padding(.leading, 52).padding(.trailing, 18).padding(.bottom, 12)
+            }
+            if !model.homeSession.skills.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(model.homeSession.skills, id: \.self) { name in
+                        SkillChip(name: name) { model.homeSession.skills.removeAll { $0 == name } }
+                    }
+                    Text("Runs with Claude Code").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.leading, 52).padding(.bottom, 12)
+            }
+            if let folder = model.homeFolder {
+                HStack {
+                    FolderTag(shortcut: folder) { model.homeFolder = nil }
+                    Spacer()
+                }
+                .padding(.leading, 52).padding(.bottom, 12)
+            }
+
+            if model.slashQuery != nil {
+                HairlineDivider()
+                SlashMenu(model: model, session: model.homeSession)
+            } else if model.draft.isEmpty && model.pendingAttachments.isEmpty && model.homeSession.skills.isEmpty {
                 let items = model.homeItems
                 if !items.isEmpty {
                     HairlineDivider()
@@ -101,18 +183,23 @@ struct HomeView: View {
                 HairlineDivider()
                 HStack(spacing: 8) {
                     Image(systemName: "return").foregroundStyle(.secondary)
-                    Text("Ask \(model.store.defaultProvider.displayName)")
-                        .foregroundStyle(.secondary)
+                    Text(askHint).foregroundStyle(.secondary)
                     Spacer()
+                    let chain = SlashCommand.parseChain(model.draft, folders: model.store.folders)
+                    if !chain.commands.isEmpty && chain.rest.isEmpty {
+                        Text("Type / for another choice").foregroundStyle(.tertiary)
+                    } else if model.store.folders.shortcuts.isEmpty {
+                        Text("Type / for folders and commands").foregroundStyle(.tertiary)
+                    }
                 }
                 .font(.system(size: 13))
                 .padding(.horizontal, 18)
                 .frame(height: 38)
             }
 
-            if let notice = model.peers.notice {
+            if let notice = model.notices.text {
                 HairlineDivider()
-                NoticeRow(text: notice) { model.peers.notice = nil }
+                NoticeRow(text: notice) { model.notices.text = nil }
             }
 
             HairlineDivider()
@@ -130,20 +217,58 @@ struct HomeView: View {
         }
         .onAppear { inputFocused = true }
         .onChange(of: model.focusToken) { inputFocused = true }
+        .onChange(of: model.homeSession.focusToken) { inputFocused = true }
+        .onChange(of: inputFocused) { _, focused in if focused { model.composerFocused(nil, inWindow: false) } }
+    }
+
+    private var askHint: String {
+        let parsed = SlashCommand.parseChain(model.draft, folders: model.store.folders)
+        var provider: ProviderKind?
+        var folder = model.homeFolder
+        var auto = model.store.autoActive
+        for command in parsed.commands {
+            switch command {
+            case .provider(let selected): provider = selected; auto = false
+            case .folder(let selected): folder = selected
+            case .auto: provider = nil; auto = true
+            case .addFolder: return "Add a folder shortcut"
+            case .skill: provider = .forSkills; auto = false
+            case .action(.share): return "Share a chat"
+            case .action(.room): return "Open a room for people nearby"
+            case .action(.folder): return "Choose a working folder"
+            }
+        }
+        if !model.homeSession.skills.isEmpty { provider = .forSkills; auto = false }
+        if let provider {
+            if provider.isDeep, let folder { return "Ask \(provider.displayName) in \(folder.display)" }
+            return "Ask \(provider.displayName)"
+        }
+        if auto { return "Ask · OpenAI picks a quick answer or coding agent" }
+        if let folder {
+            let selected = model.store.defaultProvider.isDeep ? model.store.defaultProvider : model.store.preferredDeepProvider()
+            return "Ask \(selected?.displayName ?? "a coding agent") in \(folder.display)"
+        }
+        return "Ask \(model.store.defaultProvider.displayName)"
     }
 
     private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+        if let result = SlashMenu.handle(press, model: model, session: model.homeSession) { return result }
         switch press.key {
-        case .upArrow:
+        case .delete where model.draft.isEmpty && !model.homeSession.skills.isEmpty:
+            model.homeSession.skills.removeLast(); return .handled
+        case .delete where model.draft.isEmpty && model.homeFolder != nil:
+            model.homeFolder = nil; return .handled
+        case .upArrow where model.draft.isEmpty:
             model.moveSelection(-1); return .handled
-        case .downArrow:
+        case .downArrow where model.draft.isEmpty:
             model.moveSelection(1); return .handled
         case .return:
             if press.modifiers.contains(.command) {
                 let items = model.homeItems
-                if items.indices.contains(model.selection), case .chat(let c) = items[model.selection] { model.onExpand?(c.id) }
+                if items.indices.contains(model.selection), case .chat(let c) = items[model.selection] { model.actions.expand(c.id) }
                 return .handled
             }
+            if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored } // newline
             model.submitFromHome(); return .handled
         case .escape:
             model.escape(); return .handled
@@ -153,17 +278,56 @@ struct HomeView: View {
         if press.modifiers.contains(.command), press.characters == "p" {
             model.showProviderMenu.toggle(); return .handled
         }
+        if press.modifiers.contains(.command), press.characters == "v", model.pasteAsAttachment(into: model.homeSession) {
+            return .handled
+        }
         if press.modifiers.contains(.command), press.characters == "v", model.draft.isEmpty,
            let index = model.homeItems.firstIndex(of: .clipboard) {
             model.selection = index
             model.open(.clipboard)
             return .handled
         }
+        if press.modifiers.contains(.command), press.characters == "0" {
+            model.selectAuto(); return .handled
+        }
         if press.modifiers.contains(.command), let digit = press.characters.first,
            let provider = ProviderKind.allCases.first(where: { $0.shortcutDigit == digit }) {
             model.selectProvider(provider, for: nil); return .handled
         }
         return .ignored
+    }
+}
+
+/// Open conversations stay visible while the home composer is ready for a new question.
+private struct HomeTabBubbles: View {
+    let model: PanelModel
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
+                ForEach(model.workspace.tabs, id: \.self) { id in
+                    if let conversation = model.store.conversation(id) {
+                        Button { model.selectPanelTab(id) } label: {
+                            HStack(spacing: 6) {
+                                StateDot(state: model.store.tabState(id), reduceMotion: model.reduceMotion)
+                                Text(conversation.title.isEmpty ? "New chat" : conversation.title)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: 150)
+                            }
+                            .font(.system(size: 12))
+                            .padding(.horizontal, 10)
+                            .frame(height: 28)
+                            .background(Color.primary.opacity(0.07), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open \(conversation.title.isEmpty ? "New chat" : conversation.title)")
+                        .accessibilityLabel("Open tab: \(conversation.title.isEmpty ? "New chat" : conversation.title)")
+                    }
+                }
+            }
+            .padding(.horizontal, 18)
+        }
+        .frame(height: 42)
     }
 }
 
@@ -275,15 +439,23 @@ struct ProviderPill: View {
         model.store.conversation(conversationID)?.provider ?? model.store.defaultProvider
     }
 
+    /// Home shows "Auto" while auto mode is on (a chat always shows its real provider).
+    private var showsAuto: Bool { conversationID == nil && model.store.autoActive }
+
     var body: some View {
         Button {
             model.showProviderMenu.toggle()
         } label: {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(model.store.status(provider).isReady ? Color.green : Color.secondary)
-                    .frame(width: 6, height: 6)
-                Text(provider.displayName)
+                if showsAuto {
+                    Image(systemName: "sparkles").font(.system(size: 10, weight: .semibold)).foregroundStyle(Color.accentColor)
+                    Text("Auto")
+                } else {
+                    Circle()
+                        .fill(model.store.status(provider).isReady ? Color.green : Color.secondary)
+                        .frame(width: 6, height: 6)
+                    Text(provider.displayName)
+                }
             }
             .font(.system(size: 12))
             .foregroundStyle(.primary)
@@ -294,7 +466,7 @@ struct ProviderPill: View {
         .buttonStyle(.plain)
         .help("Provider (⌘P)")
         .popover(isPresented: $model.showProviderMenu, arrowEdge: .bottom) {
-            ProviderMenu(model: model, conversationID: conversationID, current: provider)
+            ProviderMenu(model: model, conversationID: conversationID, current: provider, autoSelected: showsAuto)
         }
     }
 }
@@ -303,15 +475,19 @@ struct ProviderMenu: View {
     let model: PanelModel
     let conversationID: UUID?
     let current: ProviderKind
+    var autoSelected = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
+            if conversationID == nil {
+                autoRow
+                HairlineDivider().padding(.horizontal, 10).padding(.vertical, 4)
+            }
             section("Quick answers")
-            row(.openRouter)
+            ForEach(ProviderKind.allCases.filter { !$0.isDeep }) { row($0) }
             HairlineDivider().padding(.horizontal, 10).padding(.vertical, 4)
             section("Deep chats · runs on this Mac")
-            row(.claudeCode)
-            row(.codex)
+            ForEach(ProviderKind.deep) { row($0) }
             HairlineDivider().padding(.horizontal, 10).padding(.vertical, 4)
             Text("ContextDrop looks for each tool on your Mac and uses its own sign-in. It never stores those accounts.")
                 .font(.system(size: 11))
@@ -330,9 +506,35 @@ struct ProviderMenu: View {
             .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 2)
     }
 
+    private var autoRow: some View {
+        let available = model.store.autoAvailable
+        return Button { model.selectAuto() } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles").font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(autoSelected ? Color.white : Color.accentColor)
+                    .frame(width: 8)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Auto").font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(available ? AnyShapeStyle(autoSelected ? Color.white : Color.primary) : AnyShapeStyle(.secondary))
+                    Text(available ? "OpenAI decides: quick answer, or Claude Code for your code" : "Needs an OpenAI key")
+                        .font(.system(size: 11))
+                        .foregroundStyle(autoSelected ? AnyShapeStyle(Color.white.opacity(0.9)) : AnyShapeStyle(.secondary))
+                }
+                Spacer()
+                if autoSelected { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)) } else { Kbd("⌘0") }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(autoSelected ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!available)
+    }
+
     private func row(_ kind: ProviderKind) -> some View {
         let status = model.store.status(kind)
-        let selected = kind == current
+        let selected = kind == current && !autoSelected
         return Button {
             model.selectProvider(kind, for: conversationID)
         } label: {
@@ -349,9 +551,9 @@ struct ProviderMenu: View {
                 }
                 Spacer()
                 if case .missingKey = status {
-                    Button("Settings…") { model.onOpenSettings?() }.controlSize(.small)
-                } else if case .notFound = status {
-                    Link("How to install", destination: URL(string: kind == .claudeCode ? "https://docs.anthropic.com/en/docs/claude-code/setup" : "https://github.com/openai/codex")!)
+                    Button("Settings…") { model.actions.openSettings() }.controlSize(.small)
+                } else if case .notFound = status, let url = kind.installURL {
+                    Link("How to install", destination: url)
                         .font(.system(size: 11))
                 } else if selected {
                     Image(systemName: "checkmark").font(.system(size: 11, weight: .bold))

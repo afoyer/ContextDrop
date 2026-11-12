@@ -165,7 +165,7 @@ extension Text {
 // MARK: Palette (system colors; light/dark aware)
 
 enum Palette {
-    private static func dynamic(light: NSColor, dark: NSColor) -> Color {
+    static func dynamic(light: NSColor, dark: NSColor) -> Color {
         Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light })
     }
 
@@ -176,4 +176,90 @@ enum Palette {
     /// "From Aymeric" / picked-up block accent (orange family, like the board).
     static let fromTint = Color(nsColor: .systemOrange)
     static let answerFill = Color.primary.opacity(0.04)
+    /// Terminal pane: a slightly darker well than the chat, in both appearances.
+    static let terminalFill = dynamic(light: NSColor.black.withAlphaComponent(0.04), dark: NSColor.black.withAlphaComponent(0.22))
+}
+
+/// Thumbnails of attached images, with an optional remove button (composer) or click-to-open (sent messages).
+struct AttachmentStrip: View {
+    let attachments: [Attachment]
+    var size: CGFloat = 52
+    var onRemove: ((UUID) -> Void)?
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(attachments) { attachment in
+                    AttachmentThumb(attachment: attachment, size: size, onRemove: onRemove.map { remove in { remove(attachment.id) } })
+                }
+            }
+            .padding(.top, onRemove == nil ? 0 : 6) // room for the remove badge
+            .padding(.trailing, 6)
+        }
+        .frame(height: size + (onRemove == nil ? 0 : 6))
+    }
+}
+
+struct AttachmentThumb: View {
+    let attachment: Attachment
+    let size: CGFloat
+    var onRemove: (() -> Void)?
+    @State private var image: NSImage?
+
+    var body: some View {
+        Button { NSWorkspace.shared.open(attachment.url) } label: {
+            if !attachment.isImage {
+                // A file reference (the agent reads the file itself), a pasted link, or a pasted block of text.
+                HStack(spacing: 6) {
+                    if attachment.link != nil {
+                        Image(systemName: "link").font(.system(size: 12, weight: .semibold)).foregroundStyle(.tint).frame(width: 18, height: 18)
+                    } else if attachment.isPastedText == true {
+                        Image(systemName: "text.alignleft").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).frame(width: 18, height: 18)
+                    } else {
+                        Image(nsImage: NSWorkspace.shared.icon(forFile: attachment.path)).resizable().frame(width: 18, height: 18)
+                    }
+                    Text(attachment.name)
+                        .font(.system(size: 12, design: attachment.isPastedText == true ? .default : .monospaced))
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                .padding(.horizontal, 9)
+                .frame(maxWidth: 220, minHeight: min(size, 30), maxHeight: min(size, 30))
+                .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            } else {
+            Group {
+                if let image {
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    Rectangle().fill(.quaternary).overlay(Image(systemName: "photo").foregroundStyle(.secondary))
+                }
+            }
+            .frame(width: size * 1.4, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
+            }
+        }
+        .buttonStyle(.plain)
+        .help(attachment.isImage ? attachment.name : attachment.link ?? (attachment.isPastedText == true ? "Pasted text. Click to open it." : attachment.path))
+        .accessibilityLabel(attachment.isImage ? "Image \(attachment.name)" : attachment.link != nil ? "Link \(attachment.name)" : attachment.isPastedText == true ? attachment.name : "File \(attachment.name)")
+        .overlay(alignment: .topTrailing) {
+            if let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill")
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, Color.black.opacity(0.7))
+                        .font(.system(size: 15))
+                }
+                .buttonStyle(.plain)
+                .offset(x: 5, y: -5)
+                .accessibilityLabel("Remove \(attachment.name)")
+            }
+        }
+        .task(id: attachment.id) {
+            guard attachment.isImage else { return }
+            let url = attachment.url
+            let pixels = size * 3
+            let data = await Task.detached { Attachments.jpegData(url, maxPixels: pixels, quality: 0.8) }.value
+            image = data.flatMap(NSImage.init(data:))
+        }
+    }
 }

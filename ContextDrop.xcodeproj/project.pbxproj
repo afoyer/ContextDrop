@@ -10,6 +10,7 @@
 		C0D0000000000000000000A1 /* ContextDrop.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ContextDrop.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0D0000000000000000000A2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		C0D0000000000000000000A4 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		C0D0000000000000000002A1 /* ContextDropTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ContextDropTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -18,10 +19,22 @@
 			path = ContextDrop;
 			sourceTree = "<group>";
 		};
+		C0D0000000000000000002B1 /* ContextDropTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ContextDropTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		C0D0000000000000000000C1 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0D0000000000000000002C1 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -37,6 +50,7 @@
 				C0D0000000000000000000A4 /* README.md */,
 				C0D0000000000000000000B1 /* ContextDrop */,
 				C0D0000000000000000000D3 /* Config */,
+				C0D0000000000000000002B1 /* ContextDropTests */,
 				C0D0000000000000000000D2 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -45,6 +59,7 @@
 			isa = PBXGroup;
 			children = (
 				C0D0000000000000000000A1 /* ContextDrop.app */,
+				C0D0000000000000000002A1 /* ContextDropTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -58,6 +73,16 @@
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
+
+/* Begin PBXContainerItemProxy section */
+		C0D000000000000000000291 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C0D0000000000000000000E0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C0D0000000000000000000E1;
+			remoteInfo = ContextDrop;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXNativeTarget section */
 		C0D0000000000000000000E1 /* ContextDrop */ = {
@@ -82,6 +107,29 @@
 			productReference = C0D0000000000000000000A1 /* ContextDrop.app */;
 			productType = "com.apple.product-type.application";
 		};
+		C0D0000000000000000002E1 /* ContextDropTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C0D0000000000000000002F2 /* Build configuration list for PBXNativeTarget "ContextDropTests" */;
+			buildPhases = (
+				C0D0000000000000000002E2 /* Sources */,
+				C0D0000000000000000002C1 /* Frameworks */,
+				C0D0000000000000000002E3 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C0D000000000000000000292 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				C0D0000000000000000002B1 /* ContextDropTests */,
+			);
+			name = ContextDropTests;
+			packageProductDependencies = (
+			);
+			productName = ContextDropTests;
+			productReference = C0D0000000000000000002A1 /* ContextDropTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -94,6 +142,10 @@
 				TargetAttributes = {
 					C0D0000000000000000000E1 = {
 						CreatedOnToolsVersion = 26.2;
+					};
+					C0D0000000000000000002E1 = {
+						CreatedOnToolsVersion = 26.2;
+						TestTargetID = C0D0000000000000000000E1;
 					};
 				};
 			};
@@ -112,12 +164,20 @@
 			projectRoot = "";
 			targets = (
 				C0D0000000000000000000E1 /* ContextDrop */,
+				C0D0000000000000000002E1 /* ContextDropTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		C0D0000000000000000000E3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0D0000000000000000002E3 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -134,7 +194,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C0D0000000000000000002E2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C0D000000000000000000292 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C0D0000000000000000000E1 /* ContextDrop */;
+			targetProxy = C0D000000000000000000291 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		C0D000000000000000000101 /* Debug */ = {
@@ -241,6 +316,42 @@
 			};
 			name = Release;
 		};
+		C0D000000000000000000203 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = edu.cmu.hackathon.ContextDropTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ContextDrop.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ContextDrop";
+			};
+			name = Debug;
+		};
+		C0D000000000000000000204 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = edu.cmu.hackathon.ContextDropTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ContextDrop.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ContextDrop";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -258,6 +369,15 @@
 			buildConfigurations = (
 				C0D000000000000000000103 /* Debug */,
 				C0D000000000000000000104 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C0D0000000000000000002F2 /* Build configuration list for PBXNativeTarget "ContextDropTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C0D000000000000000000203 /* Debug */,
+				C0D000000000000000000204 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
