@@ -31,7 +31,18 @@ enum RoomMetrics {
         switch tile.content {
         case .card: 130
         case .chat: tile.collapsed ? 110 : 460
-        case .run(let run): run.isLive ? 420 : 70
+        case .run(let run): run.isLive ? 420 : tile.collapsed ? 70 : 260
+        }
+    }
+
+    /// Tiles that scroll inside themselves, so scrolling over them doesn't pan the canvas:
+    /// an open chat (its conversation) and an open finished run (its summary).
+    static func scrollsInside(_ tile: RoomTile) -> Bool {
+        guard !tile.collapsed else { return false }
+        switch tile.content {
+        case .card: return false
+        case .chat: return true
+        case .run(let run): return !run.isLive
         }
     }
 }

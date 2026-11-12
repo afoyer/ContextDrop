@@ -196,7 +196,7 @@ struct RoomCanvas: View {
             return true
         }
         let spot = viewport.toCanvas(point)
-        if tiles.contains(where: { $0.chat != nil && !$0.collapsed && rect(of: $0).contains(spot) }) { return false }
+        if tiles.contains(where: { RoomMetrics.scrollsInside($0) && rect(of: $0).contains(spot) }) { return false }
         viewport.offset.width += delta.width
         viewport.offset.height += delta.height
         return true

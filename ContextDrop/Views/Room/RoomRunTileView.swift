@@ -4,7 +4,8 @@ import UniformTypeIdentifiers
 /// A Claude Code or Codex run someone put in the room. Everyone watches; only its owner approves edits or stops it.
 /// Anyone can ask to continue it with a follow-up and files (`RoomRunContinueSheet`); it runs on the owner's Mac,
 /// in the same session, once the owner accepts. The owner's own follow-ups run at once.
-/// Three states: running (the full tile), waiting on its owner (orange, with the reason), done (one line).
+/// Three states: running (the full tile), waiting on its owner (orange, with the reason), done (a result line
+/// over the summary and changed files; collapsing it leaves the line).
 struct RoomRunTileView: View {
     let store: RoomStore
     let tile: RoomTile
@@ -15,7 +16,6 @@ struct RoomRunTileView: View {
 
     @State private var asking = false
     @State private var note = ""
-    @State private var showSummary = false
     @State private var continuing = false
     /// Files dropped on the tile, waiting in the follow-up composer.
     @State private var droppedFiles: [URL] = []
@@ -389,9 +389,18 @@ struct RoomRunTileView: View {
 
     // MARK: Done
 
+    /// The result line, then (unless collapsed) the run's summary and the files it changed, right on the tile.
     private var finished: some View {
         VStack(spacing: 0) {
             finishedRow
+            if !tile.collapsed {
+                HairlineDivider()
+                RoomRunSummary(summary: run.summary)
+                if !run.changes.isEmpty {
+                    HairlineDivider()
+                    changes
+                }
+            }
             if !run.pendingRequests.isEmpty {
                 HairlineDivider()
                 requests
@@ -415,10 +424,8 @@ struct RoomRunTileView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             AvatarView(name: run.ownerName, size: 18)
-            Button("Summary") { showSummary = true }
-                .controlSize(.small)
-                .popover(isPresented: $showSummary, arrowEdge: .bottom) { summaryPopover }
             continueButton
+            RoomCollapseButton(collapsed: tile.collapsed, noun: "run") { store.setCollapsed(tile.id, !tile.collapsed) }
         }
         .padding(.horizontal, 14)
         .frame(height: 66)
@@ -438,26 +445,43 @@ struct RoomRunTileView: View {
         return parts.joined(separator: " · ")
     }
 
-    private var summaryPopover: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(run.title).font(.system(size: 13, weight: .semibold))
-                if let summary = run.summary, !summary.isEmpty {
+}
+
+/// A finished run's final answer, inside its tile. Short summaries take their own height; longer ones stop at
+/// `maxHeight` and scroll (the canvas lets scrolling over an open finished run reach it).
+struct RoomRunSummary: View {
+    let summary: String?
+
+    @State private var textHeight: CGFloat = 0
+
+    static let maxHeight: CGFloat = 220
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            RoomKindLabel(text: "Summary", color: .secondary)
+            if let summary, !summary.isEmpty {
+                ScrollView {
                     MarkdownView(summary, fontSize: 12.5)
-                } else {
-                    Text("The run left no written summary.").font(.system(size: 12.5)).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background {
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .onAppear { textHeight = proxy.size.height }
+                                    .onChange(of: proxy.size.height) { _, height in textHeight = height }
+                            }
+                        }
                 }
-                if !run.changes.isEmpty {
-                    Divider()
-                    ForEach(Array(run.changes.enumerated()), id: \.offset) { _, change in
-                        RoomRunChangeRow(change: change)
-                    }
-                }
+                .frame(height: min(max(textHeight, 16), Self.maxHeight))
+                .scrollDisabled(textHeight <= Self.maxHeight)
+            } else {
+                Text("The run left no written summary.").font(.system(size: 12)).foregroundStyle(.secondary)
             }
-            .padding(14)
         }
-        .frame(width: 360)
-        .frame(maxHeight: 380)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
