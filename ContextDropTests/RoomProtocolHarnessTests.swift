@@ -154,6 +154,29 @@ final class RoomProtocolHarnessTests: XCTestCase {
         XCTAssertNotNil(guest.notice)
     }
 
+    /// R5 board 6 B: a run tab dropped on the canvas lands where it was dropped; dropped on a chat it is
+    /// connected to that chat; dropping it again moves the one tile instead of adding a second.
+    func testDraggedRunTabLandsAtDropPointAndConnectsToChat() {
+        let (host, guest, _, _) = setupRoom()
+        let chats = ChatStore(peers: PeerService(notices: NoticeCenter()))
+        guest.chats = chats
+        let id = chats.newConversation(provider: .claudeCode)
+        let conversation = chats.conversation(id)!
+
+        let tileID = guest.placeTab(conversation, at: CGPoint(x: 300, y: 200))!
+        XCTAssertEqual(host.tile(tileID)?.position, CGPoint(x: 300, y: 200))
+        XCTAssertNotNil(host.tile(tileID)?.run)
+
+        let chatID = host.addChatTile(title: "Help")!
+        XCTAssertEqual(guest.placeTab(conversation, at: CGPoint(x: 900, y: 40), connectingTo: chatID), tileID)
+        XCTAssertEqual(host.tile(chatID)?.chat?.runIDs, [tileID])
+        XCTAssertEqual(host.tile(tileID)?.position, CGPoint(x: 300, y: 200), "Dropped on a chat, a run already in the room stays put")
+
+        XCTAssertEqual(guest.placeTab(conversation, at: CGPoint(x: 600, y: 500)), tileID)
+        XCTAssertEqual(guest.tiles.filter { $0.run != nil }.count, 1)
+        XCTAssertEqual(guest.displayPosition(of: guest.tile(tileID)!), CGPoint(x: 600, y: 500))
+    }
+
     func testCardEditWaitsForEchoAndReportsRejection() {
         let (host, guest, _, network) = setupRoom()
         let tileID = guest.addCard(kind: .note, text: "original")!

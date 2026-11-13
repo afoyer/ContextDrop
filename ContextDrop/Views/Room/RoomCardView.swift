@@ -76,6 +76,8 @@ enum RoomPalette {
     static let runLabel = dynamic(light: NSColor(red: 0.1, green: 0.5, blue: 0.3, alpha: 1), dark: NSColor(red: 0.37, green: 0.83, blue: 0.59, alpha: 1))
     static let waitingLabel = dynamic(light: NSColor(red: 0.72, green: 0.42, blue: 0.0, alpha: 1), dark: NSColor(red: 1.0, green: 0.7, blue: 0.25, alpha: 1))
     static let running = Color(nsColor: .systemGreen)
+    /// The dashed edge of the zone a dragged tab lands in (#5fd497).
+    static let dropZone = Color(red: 0.373, green: 0.831, blue: 0.592)
     /// The button that starts something on your Mac ("Start run", "Put in room"): the green of "Acts".
     static let go = Color(red: 0.19, green: 0.64, blue: 0.42)
     static let waiting = Color(nsColor: .systemOrange)

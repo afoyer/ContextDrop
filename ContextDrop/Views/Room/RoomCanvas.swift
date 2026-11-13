@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// A card being written or edited locally. Nothing is shared until it is committed.
 struct RoomDraft: Equatable {
@@ -71,6 +72,8 @@ struct RoomCanvas: View {
     @State private var pinchStart: CGFloat?
     /// The chat tile a dragged run would be added to.
     @State private var runTarget: UUID?
+    /// Where a tab dragged in from Quick Chat or the workspace would land.
+    @State private var tabLanding: TabLanding?
     @State private var submittingDraft = false
     @State private var slowDraft = false
     @FocusState private var focusedCard: UUID?
@@ -99,6 +102,7 @@ struct RoomCanvas: View {
             .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
             .clipped()
             .contentShape(Rectangle())
+            .onDrop(of: [.contextDropTab], delegate: TabDropDelegate(hover: hoverTab, perform: dropTab))
             .simultaneousGesture(pinch)
             .background {
                 RoomCanvasInput(onScroll: scroll, onMiddleDrag: { delta in
@@ -219,6 +223,11 @@ struct RoomCanvas: View {
                     .offset(x: store.displayPosition(of: tile).x, y: store.displayPosition(of: tile).y)
                     .zIndex(dragStart[tile.id] != nil ? 2 : selection.contains(tile.id) ? 1 : 0)
             }
+            if let landing = tabLanding {
+                TabDropZone(landing: landing)
+                    .offset(x: landing.origin.x, y: landing.origin.y)
+                    .zIndex(4)
+            }
             if let current = draft {
                 RoomDraftEditor(text: Binding(get: { draft?.text ?? "" }, set: { draft?.text = $0 }),
                                 isNew: current.cardID == nil,
@@ -271,7 +280,7 @@ struct RoomCanvas: View {
         let radius = RoomMetrics.radius(for: tile)
         return content(tile)
             .overlay {
-                if runTarget == tile.id {
+                if runTarget == tile.id || tabLanding?.chatID == tile.id {
                     RoundedRectangle(cornerRadius: radius + 2, style: .continuous)
                         .strokeBorder(RoomPalette.running, style: StrokeStyle(lineWidth: 2, dash: [6, 5]))
                         .padding(-2)
@@ -387,6 +396,51 @@ struct RoomCanvas: View {
 
     private func chatUnder(_ point: CGPoint, for runID: UUID) -> UUID? {
         tiles.last { $0.chat != nil && $0.chat?.runIDs.contains(runID) == false && rect(of: $0).contains(point) }?.id
+    }
+
+    // MARK: Tabs dragged in (R5 board 6 B)
+
+    /// Where `conversation` would land if let go at `point` (canvas points): centred under the pointer, or,
+    /// over a chat, beside that chat and connected to it.
+    private func landing(for conversation: Conversation, at point: CGPoint) -> TabLanding? {
+        let share = conversation.provider.roomShare
+        guard interactive, share != .none else { return nil }
+        let width = share == .liveRun ? RoomMetrics.runWidth : RoomMetrics.chatWidth
+        let title = conversation.title.isEmpty ? "New chat" : conversation.title
+        let existing = store.runs.tileID(for: conversation.id).flatMap(store.tile)?.id
+        let chat = share == .liveRun
+            ? tiles.last { tile in
+                guard let chat = tile.chat, rect(of: tile).contains(point) else { return false }
+                return existing.map { !chat.runIDs.contains($0) } ?? true
+            }
+            : nil
+        if let chat {
+            let frame = rect(of: chat)
+            let origin = existing.flatMap(store.tile).map(\.position)
+                ?? store.freeSpot(near: CGPoint(x: frame.maxX + 44, y: frame.minY))
+            return TabLanding(conversationID: conversation.id, title: title, origin: origin, width: width,
+                              chatID: chat.id, chatTitle: chat.chat?.title ?? "Chat")
+        }
+        return TabLanding(conversationID: conversation.id, title: title,
+                          origin: CGPoint(x: point.x - width / 2, y: point.y - 28), width: width)
+    }
+
+    private func hoverTab(_ location: CGPoint?) {
+        guard let location, let id = TabDrag.current, let conversation = store.chats?.conversation(id) else {
+            if tabLanding != nil { tabLanding = nil }
+            return
+        }
+        let next = landing(for: conversation, at: viewport.toCanvas(location))
+        if next != tabLanding { tabLanding = next }
+    }
+
+    private func dropTab(_ id: UUID, at location: CGPoint) {
+        tabLanding = nil
+        guard let conversation = store.chats?.conversation(id),
+              let landing = landing(for: conversation, at: viewport.toCanvas(location)) else { return }
+        onInteract()
+        guard let tileID = store.placeTab(conversation, at: landing.origin, connectingTo: landing.chatID) else { return }
+        store.whenTileAccepted(tileID) { selection = [tileID] }
     }
 
     private func move(_ id: UUID, _ origin: CGPoint, _ translation: CGSize) {

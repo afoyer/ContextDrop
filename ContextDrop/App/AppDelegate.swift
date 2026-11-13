@@ -228,6 +228,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             model.handleDrop(urls, action: .attach, in: model.panelConversationID)
             self.quickChat.show()
         }
+        // R5 board 6 B: a tab dropped on the icon goes in the room, as the room chip would put it there.
+        menuBar.onDropTab = { [weak self] id in
+            guard let self, let conversation = self.store.conversation(id) else { return }
+            switch conversation.provider.roomShare {
+            case .liveRun: self.shareRun(conversation, level: self.panelModel.lastShareLevel)
+            case .chatCopy: self.sendTabToRoom(conversation)
+            case .none: break
+            }
+        }
     }
 
     // MARK: Needs you

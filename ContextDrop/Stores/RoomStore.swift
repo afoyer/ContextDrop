@@ -756,8 +756,9 @@ final class RoomStore {
     /// Puts one of this Mac's Claude Code or Codex chats in the room as a live tile that people can continue.
     /// `level` says how much the room sees. A run already in the room keeps its tile and its level
     /// (`setShareLevel` changes that).
+    /// `point` is where the tile goes; nil means a free spot in the middle of the view.
     @discardableResult
-    func shareRun(_ conversation: Conversation, level: RunShareLevel = .steps) -> UUID? {
+    func shareRun(_ conversation: Conversation, level: RunShareLevel = .steps, at point: CGPoint? = nil) -> UUID? {
         guard isActive else { return nil }
         if let existing = runs.tileID(for: conversation.id) {
             if tile(existing) != nil { return existing }
@@ -765,9 +766,36 @@ final class RoomStore {
             runs.tileRemoved(existing)
         }
         guard let snapshot = runs.snapshot(of: conversation.id, level: level),
-              let tile = makeTile(.run(snapshot), at: nil, width: RoomMetrics.runWidth), post(.addTile(tile)) else { return nil }
+              let tile = makeTile(.run(snapshot), at: point, width: RoomMetrics.runWidth), post(.addTile(tile)) else { return nil }
         whenTileAccepted(tile.id) { [weak self] in self?.runs.track(conversation.id, as: tile.id, level: level) }
         return tile.id
+    }
+
+    /// R5 board 6 B: a tab dragged onto the canvas. A Claude Code or Codex run lands at `point` as a live tile
+    /// (one already in the room moves there instead, keeping its level); with `chatID` it is also connected to
+    /// that chat, so people can ask about it straight away. An OpenAI tab lands as a chat copy.
+    /// The run stays on this Mac and follow-ups still need its owner's OK, as with the room chip.
+    @discardableResult
+    func placeTab(_ conversation: Conversation, at point: CGPoint, connectingTo chatID: UUID? = nil) -> UUID? {
+        guard isActive else { return nil }
+        switch conversation.provider.roomShare {
+        case .none:
+            return nil
+        case .chatCopy:
+            return shareChat(conversation, at: point)
+        case .liveRun:
+            let id: UUID
+            if let existing = runs.tileID(for: conversation.id), tile(existing) != nil {
+                // Already in the room: dropped on a chat it stays put and is connected; dropped elsewhere it moves.
+                if chatID == nil { moveTile(existing, to: point) }
+                id = existing
+            } else {
+                guard let added = shareRun(conversation, at: point) else { return nil }
+                id = added
+            }
+            if let chatID { whenTileAccepted(id) { [weak self] in self?.attachRun(id, to: chatID) } }
+            return id
+        }
     }
 
     /// Takes one of this Mac's runs back out of the room (its tile is removed for everyone; the run goes on here).
@@ -786,13 +814,13 @@ final class RoomStore {
 
     /// Puts one of this Mac's OpenAI chats in the room as a chat tile: its text, and its images as files.
     @discardableResult
-    func shareChat(_ conversation: Conversation) -> UUID? {
+    func shareChat(_ conversation: Conversation, at point: CGPoint? = nil) -> UUID? {
         guard isActive else { return nil }
         let messages = conversation.messages.filter { $0.error == nil && !$0.text.isEmpty }.suffix(60).map { message in
             RoomChatMessage(id: UUID(), kind: message.role == .user ? .user : .assistant,
                             author: message.role == .user ? localName : RoomChatMessage.assistantAuthor, text: message.text, createdAt: message.createdAt)
         }
-        guard let id = addChatTile(title: conversation.title, messages: Array(messages)) else { return nil }
+        guard let id = addChatTile(title: conversation.title, messages: Array(messages), at: point) else { return nil }
         whenTileAccepted(id) { [weak self] in
             guard let self else { return }
             for attachment in conversation.allAttachments.filter(\.isImage).prefix(RoomLimits.maxFilesPerChat) {

@@ -19,6 +19,8 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     var shortcut = ""
     /// Files dropped on the icon. `newTab` is true when ⌥ was held.
     var onDropFiles: (([URL], _ newTab: Bool) -> Void)?
+    /// A tab dropped on the icon while you're in a room (R5 board 6 B): it goes in the room.
+    var onDropTab: ((UUID) -> Void)?
 
     private var store: ChatStore { model.store }
 
@@ -43,6 +45,8 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
             let target = StatusDropView(frame: button.bounds)
             target.autoresizingMask = [.width, .height]
             target.onDrop = { [weak self] urls, option in self?.onDropFiles?(urls, option) }
+            target.onDropTab = { [weak self] id in self?.onDropTab?(id) }
+            target.acceptsTabs = { [weak room] in room?.isActive == true }
             target.onTargeted = { [weak button] targeted in button?.highlight(targeted) }
             button.addSubview(target)
         }
@@ -172,14 +176,21 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     }
 }
 
-/// Sits over the status button to take file drops (R3 board 5). Clicks pass through to the button.
+/// Sits over the status button to take file drops (R3 board 5) and, in a room, tabs (R5 board 6 B).
+/// Clicks pass through to the button.
 private final class StatusDropView: NSView {
     var onDrop: (([URL], _ option: Bool) -> Void)?
+    var onDropTab: ((UUID) -> Void)?
+    var acceptsTabs: () -> Bool = { false }
     var onTargeted: ((Bool) -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        registerForDraggedTypes([.fileURL])
+        registerForDraggedTypes([.fileURL, .contextDropTab])
+    }
+
+    private func carriesTab(_ sender: NSDraggingInfo) -> Bool {
+        sender.draggingPasteboard.types?.contains(.contextDropTab) == true
     }
 
     @available(*, unavailable)
@@ -192,6 +203,11 @@ private final class StatusDropView: NSView {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if carriesTab(sender) {
+            guard acceptsTabs() else { return [] }
+            onTargeted?(true)
+            return .copy
+        }
         guard !urls(sender).isEmpty else { return [] }
         onTargeted?(true)
         return .copy
@@ -202,6 +218,13 @@ private final class StatusDropView: NSView {
     override func draggingEnded(_ sender: NSDraggingInfo) { onTargeted?(false) }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if carriesTab(sender) {
+            onTargeted?(false)
+            let id = TabDrag.id(from: sender.draggingPasteboard.data(forType: .contextDropTab)) ?? TabDrag.current
+            guard acceptsTabs(), let id else { return false }
+            DispatchQueue.main.async { [onDropTab] in onDropTab?(id) }
+            return true
+        }
         let urls = urls(sender)
         onTargeted?(false)
         guard !urls.isEmpty else { return false }

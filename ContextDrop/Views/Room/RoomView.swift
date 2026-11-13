@@ -336,7 +336,7 @@ struct RoomView: View {
                 VStack(spacing: 6) {
                     Text("Nothing in the room yet")
                         .font(.system(size: 14, weight: .semibold))
-                    Text("Ask something below to start a chat everyone can reply in.\nDouble-click to write a thought, or drop files onto a chat.")
+                    Text("Ask something below to start a chat everyone can reply in.\nDouble-click to write a thought, drop files onto a chat,\nor drag a Claude Code or Codex tab in from Quick Chat.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
