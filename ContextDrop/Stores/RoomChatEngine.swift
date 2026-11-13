@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
 @MainActor
 final class RoomChatEngine {
     private unowned let store: RoomStore
+    private let provider: any RoomAnswerProvider
 
     /// Room file id → OpenAI file id (images, PDFs, documents).
     private var openAIFileIDs: [UUID: String] = [:]
@@ -18,6 +19,8 @@ final class RoomChatEngine {
     private var contexts: [UUID: String] = [:]
     private var contextTasks: [UUID: Task<Void, Never>] = [:]
     private var replyTasks: [UUID: Task<Void, Never>] = [:]
+    private var deltaInFlight: Set<UUID> = []
+    private var queuedDeltas: [UUID: RoomChatMessage] = [:]
     private var uploadTasks: [UUID: Task<Void, Never>] = [:]
     /// Chats where someone wrote while a reply was still streaming.
     private var waiting: Set<UUID> = []
@@ -25,8 +28,9 @@ final class RoomChatEngine {
     private static let batchInterval: Duration = .milliseconds(50)
     private static let fileWait: TimeInterval = 120
 
-    init(store: RoomStore) {
+    init(store: RoomStore, provider: any RoomAnswerProvider = OpenAIRoomAnswerProvider()) {
         self.store = store
+        self.provider = provider
     }
 
     private var me: String { store.localName }
@@ -53,6 +57,8 @@ final class RoomChatEngine {
         for task in contextTasks.values { task.cancel() }
         for task in uploadTasks.values { task.cancel() }
         replyTasks = [:]
+        deltaInFlight = []
+        queuedDeltas = [:]
         contextTasks = [:]
         uploadTasks = [:]
         waiting = []
@@ -62,15 +68,18 @@ final class RoomChatEngine {
         openAIFileIDs = [:]
         localFiles = [:]
         for folder in folders { try? FileManager.default.removeItem(at: folder) }
-        if !uploaded.isEmpty, let client = try? OpenAIResponses.fromSettings() {
+        if !uploaded.isEmpty {
+            let provider = self.provider
             Task.detached(priority: .utility) {
-                for id in uploaded { await client.delete(fileID: id) }
+                for id in uploaded { await provider.delete(fileID: id) }
             }
         }
     }
 
     func tileRemoved(_ id: UUID) {
         replyTasks.removeValue(forKey: id)?.cancel()
+        deltaInFlight.remove(id)
+        queuedDeltas[id] = nil
         contextTasks.removeValue(forKey: id)?.cancel()
         contexts[id] = nil
         waiting.remove(id)
@@ -79,12 +88,13 @@ final class RoomChatEngine {
 
     /// Drops a file once no chat on this Mac uses it any more.
     func forgetFile(_ fileID: UUID) {
-        let stillUsed = store.tiles.contains { $0.chat?.ownerName == me && $0.chat?.files.contains { $0.id == fileID } == true }
+        let stillUsed = store.tiles.contains { $0.chat?.ownerID == store.localID && $0.chat?.files.contains { $0.id == fileID } == true }
         guard !stillUsed else { return }
         uploadTasks.removeValue(forKey: fileID)?.cancel()
         if let url = localFiles.removeValue(forKey: fileID) { try? FileManager.default.removeItem(at: url) }
-        if let id = openAIFileIDs.removeValue(forKey: fileID), let client = try? OpenAIResponses.fromSettings() {
-            Task.detached(priority: .utility) { await client.delete(fileID: id) }
+        if let id = openAIFileIDs.removeValue(forKey: fileID) {
+            let provider = self.provider
+            Task.detached(priority: .utility) { await provider.delete(fileID: id) }
         }
     }
 
@@ -123,12 +133,12 @@ final class RoomChatEngine {
     private func prepare(_ file: RoomFile, at url: URL, tileID: UUID) {
         let fileID = file.id
         uploadTasks[fileID] = Task { [weak self] in
-            let (openAIID, status) = await Self.upload(file, at: url)
+            let (openAIID, status) = await Self.upload(file, at: url, provider: self?.provider ?? OpenAIRoomAnswerProvider())
             guard let self, !Task.isCancelled, self.localFiles[fileID] != nil else { return }
             self.uploadTasks[fileID] = nil
             if let openAIID { self.openAIFileIDs[fileID] = openAIID }
             // Every chat on this Mac that holds the file (a spawned chat shares it with its source).
-            for tile in self.store.tiles where tile.chat?.ownerName == self.me {
+            for tile in self.store.tiles where tile.chat?.ownerID == self.store.localID {
                 if tile.chat?.files.contains(where: { $0.id == fileID && $0.status == .sending }) == true {
                     self.store.post(.fileStatus(tile.id, fileID: fileID, status))
                 }
@@ -138,7 +148,7 @@ final class RoomChatEngine {
 
     /// Makes a file usable by the model: the OpenAI file id (nil for text, which is sent inline) and
     /// `.ready`, or why it can't be used.
-    private static func upload(_ file: RoomFile, at url: URL) async -> (openAIID: String?, status: RoomFile.Status) {
+    private static func upload(_ file: RoomFile, at url: URL, provider: any RoomAnswerProvider) async -> (openAIID: String?, status: RoomFile.Status) {
         await OpenAISettings.preload()
         switch file.kind {
         case .text:
@@ -149,16 +159,15 @@ final class RoomChatEngine {
         case .image, .pdf, .document:
             guard OpenAIModelCaps.takesFiles(OpenAISettings.model) else { return (nil, .unsupported(OpenAIModelCaps.suggested)) }
             do {
-                let client = try OpenAIResponses.fromSettings()
                 if file.kind == .image {
                     // Downscaled JPEG: what a vision model needs, at a fraction of the size.
                     guard let jpeg = Attachments.jpegData(url) else { return (nil, .failed("The image couldn’t be read.")) }
                     let name = (file.name as NSString).deletingPathExtension + ".jpg"
-                    return (try await client.upload(jpeg, name: name, mimeType: "image/jpeg", purpose: "vision"), .ready)
+                    return (try await provider.upload(jpeg, name: name, mimeType: "image/jpeg", purpose: "vision"), .ready)
                 }
                 let data = try Data(contentsOf: url, options: .mappedIfSafe)
                 let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
-                return (try await client.upload(data, name: file.name, mimeType: mime, purpose: "user_data"), .ready)
+                return (try await provider.upload(data, name: file.name, mimeType: mime, purpose: "user_data"), .ready)
             } catch {
                 let reason = error.userMessage
                 return (nil, .failed(String(reason.prefix(140))))
@@ -241,7 +250,7 @@ final class RoomChatEngine {
 
     /// Someone wrote in a chat this Mac owns.
     func userMessageArrived(_ tileID: UUID) {
-        guard store.tile(tileID)?.chat?.ownerName == me else { return }
+        guard store.tile(tileID)?.chat?.ownerID == store.localID else { return }
         if replyTasks[tileID] != nil {
             waiting.insert(tileID)
         } else {
@@ -249,13 +258,49 @@ final class RoomChatEngine {
         }
     }
 
+    func stopReply(_ tileID: UUID) {
+        replyTasks.removeValue(forKey: tileID)?.cancel()
+        queuedDeltas[tileID] = nil
+        deltaInFlight.remove(tileID)
+        waiting.remove(tileID)
+    }
+
+    private func queueDelta(_ answer: RoomChatMessage, tileID: UUID) {
+        queuedDeltas[tileID] = answer
+        guard !deltaInFlight.contains(tileID) else { return }
+        sendQueuedDelta(tileID)
+    }
+
+    private func sendQueuedDelta(_ tileID: UUID) {
+        guard let answer = queuedDeltas.removeValue(forKey: tileID) else { return }
+        deltaInFlight.insert(tileID)
+        guard store.post(.chatDelta(tileID, answer), onAccepted: { [weak self] error in
+            guard let self else { return }
+            self.deltaInFlight.remove(tileID)
+            if error != nil { self.stopReply(tileID); return }
+            if self.queuedDeltas[tileID] != nil { self.sendQueuedDelta(tileID) }
+            else if !answer.streaming {
+                self.replyTasks[tileID] = nil
+                if self.waiting.remove(tileID) != nil { self.reply(in: tileID) }
+            }
+        }) else {
+            deltaInFlight.remove(tileID)
+            stopReply(tileID)
+            return
+        }
+    }
+
     private func reply(in tileID: UUID) {
-        var answer = RoomChatMessage(id: UUID(), kind: .assistant, author: RoomChatMessage.assistantAuthor, text: "", streaming: true)
-        guard store.post(.chatMessage(tileID, answer)) else { return }
+        let answer = RoomChatMessage(id: UUID(), kind: .assistant, author: RoomChatMessage.assistantAuthor, text: "", streaming: true)
+        guard store.post(.chatMessage(tileID, answer), onAccepted: { [weak self] error in
+            if error == nil { self?.startReply(in: tileID, answer: answer) }
+        }) else { return }
+    }
+
+    private func startReply(in tileID: UUID, answer initialAnswer: RoomChatMessage) {
+        var answer = initialAnswer
         replyTasks[tileID] = Task { [weak self] in
             do {
-                await OpenAISettings.preload()
-                let client = try OpenAIResponses.fromSettings()
                 // A file dropped just before the question is still on its way or uploading: wait for it.
                 await self?.contextTasks[tileID]?.value
                 try await self?.waitForFiles(in: tileID)
@@ -265,12 +310,12 @@ final class RoomChatEngine {
 
                 var length = 0
                 var lastSent = ContinuousClock.now
-                for try await delta in client.stream(instructions: request.instructions, turns: request.turns) {
+                for try await delta in self.provider.stream(instructions: request.instructions, turns: request.turns) {
                     answer.text += delta
                     length += delta.count
                     try Task.checkCancellation()
                     if ContinuousClock.now - lastSent >= Self.batchInterval {
-                        self.store.post(.chatDelta(tileID, answer))
+                        self.queueDelta(answer, tileID: tileID)
                         lastSent = .now
                     }
                     if length >= RoomLimits.maxTextLength { break }
@@ -284,10 +329,8 @@ final class RoomChatEngine {
                 answer.failed = !cancelled
             }
             guard let self, self.replyTasks[tileID] != nil else { return } // tile removed or room left
-            self.replyTasks[tileID] = nil
             answer.streaming = false
-            self.store.post(.chatDelta(tileID, answer))
-            if self.waiting.remove(tileID) != nil { self.reply(in: tileID) }
+            self.queueDelta(answer, tileID: tileID)
         }
     }
 
@@ -300,7 +343,7 @@ final class RoomChatEngine {
 
     private struct Request {
         var instructions: String
-        var turns: [OpenAIResponses.Turn]
+        var turns: [RoomAnswerTurn]
         var sawFiles: [String]
         var sawRuns: Bool
     }
@@ -309,10 +352,10 @@ final class RoomChatEngine {
         guard let chat = store.tile(tileID)?.chat else { return nil }
 
         // The conversation so far. People are told apart by name.
-        var turns: [OpenAIResponses.Turn] = []
+        var turns: [RoomAnswerTurn] = []
         var budget = 60_000
         for message in chat.messages.reversed() where message.id != answerID && !message.text.isEmpty && !message.failed {
-            let line: OpenAIResponses.Turn
+            let line: RoomAnswerTurn
             switch message.kind {
             case .user: line = .init(role: "user", parts: [.text("\(message.author): \(message.text)")])
             case .assistant: line = .init(role: "assistant", parts: [.text(message.text)])
@@ -329,7 +372,7 @@ final class RoomChatEngine {
         // Every file in the chat goes with the newest question, by its stored id (never uploaded twice).
         var sawFiles: [String] = []
         var skipped: [String] = []
-        var fileParts: [OpenAIResponses.Part] = []
+        var fileParts: [RoomAnswerPart] = []
         for file in chat.files {
             guard file.status == .ready else {
                 skipped.append(file.name)

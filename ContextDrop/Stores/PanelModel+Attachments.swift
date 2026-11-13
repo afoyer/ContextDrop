@@ -88,7 +88,7 @@ extension PanelModel {
                 }
             } else if let id = conversationID {
                 // "Use as working folder".
-                if store.conversation(id)?.provider.isDeep == false, let deep = store.preferredDeepProvider() {
+                if store.conversation(id)?.provider.capabilities.requiresFolder == false, let deep = store.preferredDeepProvider() {
                     store.setProvider(deep, for: id)
                 }
                 store.setFolder(folder, for: id)
@@ -100,7 +100,7 @@ extension PanelModel {
         case .newTab:
             let provider = files.contains(where: { !Attachments.isImage($0) }) ? (store.preferredDeepProvider() ?? store.defaultProvider) : store.defaultProvider
             let id = store.newConversation(provider: provider)
-            if provider.isDeep, let folder = AppDefaults.lastFolder ?? AppDefaults.folder { store.setFolder(folder, for: id) }
+            if provider.capabilities.requiresFolder, let folder = AppDefaults.lastFolder ?? AppDefaults.folder { store.setFolder(folder, for: id) }
             attachDropped(files, to: session(id))
             openInWorkspace(id)
         case .attach, .runSkill:

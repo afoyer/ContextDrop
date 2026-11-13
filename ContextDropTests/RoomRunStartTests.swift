@@ -7,17 +7,17 @@ final class RoomRunStartTests: XCTestCase {
     private let t0 = Date(timeIntervalSince1970: 100)
 
     private func card(by name: String, _ kind: RoomCardBody.Kind = .note, text: String) -> RoomTile {
-        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name, movedAt: t0, updatedAt: t0,
+        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name,
                  content: .card(RoomCardBody(kind: kind, text: text, caption: nil)))
     }
 
     private func chat(ownedBy name: String, title: String, messages: [RoomChatMessage] = [], files: [RoomFile] = []) -> RoomTile {
-        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name, movedAt: t0, updatedAt: t0,
+        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name,
                  content: .chat(RoomChatTile(title: title, ownerName: name, model: "gpt-4.1", messages: messages, files: files)))
     }
 
     private func run(ownedBy name: String) -> RoomTile {
-        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name, movedAt: t0, updatedAt: t0,
+        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name,
                  content: .run(RoomRunTile(ownerName: name, title: "Fix login", folder: "~/p")))
     }
 

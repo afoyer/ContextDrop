@@ -35,8 +35,8 @@ To change your name, open Settings › General.
 
 ```sh
 APP=build/DerivedData/Build/Products/Debug/ContextDrop.app
-open -n "$APP" --args -ContextDrop.displayName Alice
-open -n "$APP" --args -ContextDrop.displayName Bob
+open -n "$APP" --args -ContextDrop.displayName Alice -ContextDrop.memberID 11111111-1111-4111-8111-111111111111
+open -n "$APP" --args -ContextDrop.displayName Bob -ContextDrop.memberID 22222222-2222-4222-8222-222222222222
 log stream --info --predicate 'subsystem == "edu.cmu.hackathon.ContextDrop"'
 ```
 
@@ -91,6 +91,10 @@ xcodebuild test -project ContextDrop.xcodeproj -scheme ContextDrop -derivedDataP
 
 The tests in `ContextDropTests/` cover the parts that have no UI: the Claude Code and Codex output parsers, `CLIRunner` end to end (with `/bin/sh` standing in for an agent, so no account is used), the provider registry, the chat and room reducers, slash-command chains, the room wire format, the Auto decision's reply, diffs and secret masking. The app is the test host, and it skips its normal startup when it is only hosting tests.
 
+Room chat transcripts and the run-watch panel follow new output while you are at the bottom. Scroll upward to read without being pulled back; **Jump to latest** resumes following. Sending a room-chat message also resumes following.
+
+GitHub Actions runs the application tests on macOS with code signing disabled and retains the test-result bundle. For a machine without a development signing certificate, append `CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO DEVELOPMENT_TEAM=` to the test command above.
+
 ## Extending
 
 **Add a coding-agent CLI.** Three steps, no changes to `ChatStore` or the views:
@@ -126,7 +130,7 @@ Settings keys live in `Services/AppDefaults.swift`. One-line messages to the use
 
 ## Known limitations
 
-- Peers are **not authenticated**: anyone nearby can claim any name. Accepting an offer or a room invitation is the only gate.
+- Room members have installation-stable IDs separate from display names, so two people with the same name have separate permissions. Nearby peers are **not cryptographically authenticated**; accepting a room invitation remains the gate.
 - Multipeer has no "declined" signal, so a drop that ends before the timeout is shown as declined.
 - Chats are kept in memory only and are gone when the app quits.
 - Room: thoughts, kept answers and notes only. No votes, linked actions, tasks, cursors or saving yet.

@@ -62,7 +62,7 @@ final class RoomRunInbox {
 
     /// File bytes from someone else arrived for a follow-up on one of this Mac's runs.
     func ingest(_ url: URL, tileID: UUID, fileID: UUID) {
-        guard let run = store.tile(tileID)?.run, run.ownerName == me,
+        guard let run = store.tile(tileID)?.run, run.ownerID == store.localID,
               let file = run.requests.lazy.flatMap(\.files).first(where: { $0.id == fileID }) else {
             try? FileManager.default.removeItem(at: url)
             return
@@ -108,15 +108,16 @@ final class RoomRunInbox {
             localFiles[file.id] = nil
             attachments.append(Self.attachment(id: file.id, at: held.url, name: file.name))
         }
-        chats.ask(Self.prompt(request, me: me, attachments: attachments), attachments: attachments,
-                  levelCap: Self.levelCap(for: request, me: me), in: conversationID)
+        if request.fromID != store.localID { chats.markUntrustedContent(in: conversationID) }
+        chats.ask(Self.prompt(request, me: store.localID, attachments: attachments), attachments: attachments,
+                  levelCap: Self.levelCap(for: request, me: store.localID), in: conversationID)
     }
 
     /// The most a follow-up may do on its own. Someone else's runs at most at "Ask before editing", whatever the
     /// chat is set to: the owner approved the words, not what the agent might be talked into by the files that
     /// came with them, so every edit or command still comes back to the owner.
     nonisolated static func levelCap(for request: RunRequest, me: String) -> PermissionLevel? {
-        request.from == me ? nil : .ask
+        (request.fromID.isEmpty ? request.from : request.fromID) == me ? nil : .ask
     }
 
     /// What the agent is asked. Someone else's words are marked as theirs; the owner accepted them.
@@ -127,7 +128,7 @@ final class RoomRunInbox {
         if text.isEmpty {
             text = attachments.count == 1 ? "Take a look at the attached file." : "Take a look at the attached files."
         }
-        guard request.from != me else { return text }
+        guard (request.fromID.isEmpty ? request.from : request.fromID) != me else { return text }
         let asked = "\(request.from) asked this from the room we share (I approved it):\n\n\(text)"
         return attachments.isEmpty ? asked : asked + "\n\n" + untrustedFiles(from: request.from)
     }

@@ -48,15 +48,26 @@ extension RoomStore {
         let id = chats.newConversation(provider: provider)
         chats.setFolder(folder, for: id)
         chats.setPermissionLevel(level, for: id)
-        // This Mac's user chose the task, context and permission level. Selected reference material must
-        // not override that choice. Requests sent by other members are capped separately in RoomRunInbox.
-        chats.ask(built.text, attachments: attachments, in: id)
-
+        if !sources.isEmpty {
+            chats.markUntrustedContent(in: id)
+            if level == .acceptEdits || level == .auto { notice = "Runs using room content ask before making edits." }
+        }
         guard let conversation = chats.conversation(id), let tileID = shareRun(conversation) else {
-            notice = "The run started on your Mac, but it couldn’t be put in the room. Share it from its tab."
+            notice = "The run couldn’t be put in the room."
+            chats.removeConversation(id)
+            for attachment in attachments { try? FileManager.default.removeItem(at: attachment.url.deletingLastPathComponent()) }
             return nil
         }
-        if let spot { moveTile(tileID, to: spot) }
+        whenTileSettled(tileID) { error in
+            guard error != nil else { return }
+            chats.removeConversation(id)
+            for attachment in attachments { try? FileManager.default.removeItem(at: attachment.url.deletingLastPathComponent()) }
+        }
+        whenTileAccepted(tileID) { [weak self] in
+            guard let self else { return }
+            if let spot { self.moveTile(tileID, to: spot) }
+            chats.ask(built.text, attachments: attachments, in: id)
+        }
         return tileID
     }
 

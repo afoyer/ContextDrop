@@ -233,6 +233,8 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
     var cliSessionID: String?
     /// How much the coding agent may do without asking.
     var permissionLevel: PermissionLevel = AppDefaults.permissionLevel
+    /// Imported or room-supplied material remains untrusted for every later answer in this conversation.
+    var containsUntrustedContent = false
     /// Tools the user chose to always allow in this chat (see `PermissionRequest.rule`).
     var alwaysAllowed: Set<String> = []
     /// Skills used with every message in this chat.
@@ -250,6 +252,7 @@ struct Conversation: Identifiable, Codable, Hashable, Sendable {
         self.provider = provider
         self.folder = folder
         self.pickedUp = pickedUp
+        self.containsUntrustedContent = pickedUp != nil
     }
 
     var keptCount: Int { messages.filter(\.kept).count }

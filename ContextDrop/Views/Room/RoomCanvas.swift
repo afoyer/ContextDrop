@@ -71,6 +71,8 @@ struct RoomCanvas: View {
     @State private var pinchStart: CGFloat?
     /// The chat tile a dragged run would be added to.
     @State private var runTarget: UUID?
+    @State private var submittingDraft = false
+    @State private var slowDraft = false
     @FocusState private var focusedCard: UUID?
 
     private static let space = "roomCanvas"
@@ -131,7 +133,7 @@ struct RoomCanvas: View {
         Color.clear
             .contentShape(Rectangle())
             .gesture(SpatialTapGesture(count: 2).onEnded { value in
-                guard interactive else { return }
+                guard interactive, !submittingDraft else { return }
                 commitDraft()
                 onInteract()
                 selection = []
@@ -214,15 +216,16 @@ struct RoomCanvas: View {
             ForEach(shown) { tile in
                 tileItem(tile)
                     .opacity(draft?.cardID == tile.id ? 0 : 1)
-                    .offset(x: tile.x, y: tile.y)
+                    .offset(x: store.displayPosition(of: tile).x, y: store.displayPosition(of: tile).y)
                     .zIndex(dragStart[tile.id] != nil ? 2 : selection.contains(tile.id) ? 1 : 0)
             }
             if let current = draft {
                 RoomDraftEditor(text: Binding(get: { draft?.text ?? "" }, set: { draft?.text = $0 }),
                                 isNew: current.cardID == nil,
                                 kind: current.cardID.flatMap { store.tile($0)?.card?.kind } ?? .thought,
+                                sending: submittingDraft, slow: slowDraft,
                                 onCommit: commitDraft,
-                                onCancel: { draft = nil })
+                                onCancel: { if !submittingDraft { draft = nil } })
                     .offset(x: current.point.x, y: current.point.y)
                     .zIndex(3)
             }
@@ -406,20 +409,38 @@ struct RoomCanvas: View {
     // MARK: Writing
 
     private func beginEditing(_ tile: RoomTile) {
-        guard interactive, let card = tile.card else { return }
+        guard interactive, !submittingDraft, let card = tile.card else { return }
         commitDraft()
         draft = RoomDraft(cardID: tile.id, point: tile.position, text: card.text)
     }
 
     private func commitDraft() {
-        guard let current = draft else { return }
-        draft = nil
+        guard !submittingDraft, let current = draft else { return }
         let text = current.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty else { draft = nil; return }
+        let finish: @MainActor (String?) -> Void = { error in
+            submittingDraft = false
+            slowDraft = false
+            if error == nil, draft == current { draft = nil }
+            if error != nil, let id = current.cardID, store.tile(id) == nil { draft?.cardID = nil }
+        }
         if let id = current.cardID {
-            if store.tile(id)?.card?.text != text { store.editCard(id, text: text) }
-        } else if let id = store.addCard(kind: .thought, text: text, at: current.point) {
-            selection = [id]
+            guard store.tile(id)?.card?.text != text else { draft = nil; return }
+            submittingDraft = true
+            if !store.editCard(id, text: text, onAccepted: finish) { submittingDraft = false }
+        } else {
+            submittingDraft = true
+            if let id = store.addCard(kind: .thought, text: text, at: current.point, onAccepted: finish) {
+                store.whenTileAccepted(id) { selection = [id] }
+            } else {
+                submittingDraft = false
+            }
+        }
+        if submittingDraft {
+            Task {
+                try? await Task.sleep(for: .seconds(5))
+                if submittingDraft { slowDraft = true }
+            }
         }
     }
 }
@@ -480,6 +501,8 @@ private struct RoomDraftEditor: View {
     @Binding var text: String
     let isNew: Bool
     let kind: RoomCardBody.Kind
+    let sending: Bool
+    let slow: Bool
     let onCommit: () -> Void
     let onCancel: () -> Void
     @FocusState private var focused: Bool
@@ -494,14 +517,20 @@ private struct RoomDraftEditor: View {
                 .focused($focused)
                 .onSubmit(onCommit)
                 .onExitCommand(perform: onCancel)
+                .disabled(sending)
                 .accessibilityLabel(isNew ? "New thought" : "Card text")
+            if sending {
+                Text(slow ? "Still waiting for the host. Your text is saved." : "Sending to host…")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
             HStack(spacing: 8) {
                 HintItem(key: "↵", label: isNew ? "Add" : "Save")
                 HintItem(key: "esc", label: "Cancel")
                 Spacer(minLength: 0)
                 Button(isNew ? "Add" : "Save", action: onCommit)
                     .controlSize(.small)
-                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .font(.system(size: 10.5))
             .foregroundStyle(.secondary)

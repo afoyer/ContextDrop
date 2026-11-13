@@ -390,3 +390,26 @@ struct ClaudeCodeParser: CLIParser {
         }
     }
 }
+
+
+extension ClaudeCodeAgent {
+    static func answerPermission(_ request: PermissionRequest, allow: Bool, reason: String?, on handle: CLIRunner.Handle) {
+        let response: [String: Any]
+        if allow {
+            let input = (try? JSONSerialization.jsonObject(with: request.input)) as? [String: Any] ?? [:]
+            response = ["behavior": "allow", "updatedInput": input]
+        } else {
+            response = ["behavior": "deny", "message": reason ?? "The user declined this."]
+        }
+        handle.write(["type": "control_response",
+                      "response": ["subtype": "success", "request_id": request.id, "response": response]])
+    }
+
+    static func answerQuestion(_ question: AgentQuestion, on handle: CLIRunner.Handle) {
+        var input = (try? JSONSerialization.jsonObject(with: question.input)) as? [String: Any] ?? [:]
+        input["answers"] = Dictionary(question.items.map { ($0.question, $0.answer ?? "") }, uniquingKeysWith: { first, _ in first })
+        let response: [String: Any] = ["behavior": "allow", "updatedInput": input]
+        handle.write(["type": "control_response",
+                      "response": ["subtype": "success", "request_id": question.id, "response": response]])
+    }
+}

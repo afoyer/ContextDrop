@@ -167,7 +167,7 @@ final class PanelModel {
     /// The terminal pane is shown for deep chats (Claude Code / Codex) in chat mode.
     var terminalVisible: Bool {
         guard showTerminal, case .chat(let id) = mode, let conversation = store.conversation(id) else { return false }
-        return conversation.provider.isDeep
+        return conversation.provider.capabilities.requiresFolder
     }
 
     /// The conversation shown in the panel, if any.
@@ -374,7 +374,7 @@ final class PanelModel {
         guard !store.isRunning(id) else { return }
         let attachments = input.pendingAttachments
         let skills = input.skills
-        if conversation.provider.isDeep && conversation.folder == nil {
+        if conversation.provider.capabilities.requiresFolder && conversation.folder == nil {
             if conversation.messages.last?.role == .user {
                 actions.chooseFolder(id)
                 return
@@ -452,12 +452,12 @@ final class PanelModel {
         guard store.status(provider).isUsable else { return }
         if let id {
             store.setProvider(provider, for: id, asDefault: true)
-            if provider.isDeep, store.conversation(id)?.folder == nil { actions.chooseFolder(id) }
+            if provider.capabilities.requiresFolder, store.conversation(id)?.folder == nil { actions.chooseFolder(id) }
         } else {
             store.defaultProvider = provider
             store.autoRoute = false
             AppDefaults.provider = provider
-            if !provider.isDeep { homeFolder = nil }
+            if !provider.capabilities.requiresFolder { homeFolder = nil }
         }
         focusToken += 1
     }
@@ -465,7 +465,7 @@ final class PanelModel {
     /// ⇧Tab: the next permission level, on home (nil) or in a chat (from its next message).
     func cyclePermissionLevel(in id: UUID?) {
         if let id {
-            guard let conversation = store.conversation(id), conversation.provider.isDeep else { return }
+            guard let conversation = store.conversation(id), conversation.provider.capabilities.requiresFolder else { return }
             store.setPermissionLevel(conversation.permissionLevel.next, for: id)
         } else {
             homeLevel = homeLevel.next

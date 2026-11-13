@@ -4,7 +4,7 @@ import XCTest
 /// The room wire format: what is accepted, what is refused, and what is cut down to size on the way in.
 final class RoomCodecTests: XCTestCase {
     private func tile(text: String = "hi", x: Double = 10, y: Double = 20) -> RoomTile {
-        RoomTile(id: UUID(), x: x, y: y, addedBy: "Alice", movedAt: Date(timeIntervalSince1970: 100), updatedAt: Date(timeIntervalSince1970: 100),
+        RoomTile(id: UUID(), x: x, y: y, addedBy: "Alice",
                  content: .card(RoomCardBody(kind: .thought, text: text, caption: nil)))
     }
 
@@ -26,8 +26,8 @@ final class RoomCodecTests: XCTestCase {
             .hello(RoomMember(id: "Alice", name: "Alice", isHost: false)),
             .snapshot(RoomState(id: id, name: "Table", hostName: "Alice", members: [], tiles: [tile()])),
             .memberLeft("Alice"), .ended,
-            .addTile(tile()), .moveTile(id, x: 1, y: 2, stamp: stamp), .editTile(id, text: "t", stamp: stamp),
-            .removeTile(id), .setCollapsed(id, true, stamp: stamp),
+            .addTile(tile()), .moveTile(id, x: 1, y: 2), .editTile(id, text: "t"),
+            .removeTile(id), .setCollapsed(id, true),
             .chatMessage(id, chat), .chatDelta(id, chat),
             .addFile(id, file), .fileStatus(id, fileID: file.id, .ready), .removeFile(id, fileID: file.id, messageID: UUID()),
             .requestFiles(from: id, to: other),
@@ -36,7 +36,60 @@ final class RoomCodecTests: XCTestCase {
             .runRequestStatus(id, requestID: other, .accepted),
         ]
         for message in messages {
-            XCTAssertEqual(try roundTrip(message).kind, message.kind)
+            XCTAssertEqual(try roundTrip(message), message)
+        }
+    }
+
+    func testOperationOutcomesKeepFullPayloadInFlatEnvelope() throws {
+        let operationID = UUID()
+        let change = RoomMessage.editTile(UUID(), text: "quoted \"text\"")
+        for message in [RoomMessage.submit(operationID, change), .accepted(operationID, change),
+                        .rejected(operationID, "Room capacity reached.")] {
+            XCTAssertEqual(try roundTrip(message), message)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: RoomCodec.encode(message)) as? [String: Any])
+            XCTAssertEqual(json["operationID"] as? String, operationID.uuidString)
+            XCTAssertEqual(json["version"] as? Int, RoomMessage.currentVersion)
+            XCTAssertNil(json["change"], "Operations must retain the flat wire format")
+        }
+    }
+
+    func testMemberIdentityAndRunNoteIdentitySurviveTheCodec() throws {
+        let memberID = UUID().uuidString
+        let note = RunNote(id: UUID(), from: "Alice", fromID: memberID, text: "Review this")
+        XCTAssertEqual(try roundTrip(.hello(RoomMember(id: memberID, name: "Alice", isHost: false))),
+                       .hello(RoomMember(id: memberID, name: "Alice", isHost: false)))
+        XCTAssertEqual(try roundTrip(.runNote(UUID(uuidString: "11111111-1111-4111-8111-111111111111")!, note)),
+                       .runNote(UUID(uuidString: "11111111-1111-4111-8111-111111111111")!, note))
+    }
+
+    func testAcceptedPayloadIsStillSanitized() throws {
+        let operationID = UUID()
+        let original = tile(text: String(repeating: "x", count: RoomLimits.maxTextLength + 500), x: 9e12)
+        let accepted = try roundTrip(.accepted(operationID, .addTile(original)))
+        XCTAssertEqual(accepted, .accepted(operationID, .addTile(original.sanitized())))
+    }
+
+    func testVersionIsCheckedBeforeUnknownKindOrPayload() {
+        for json in [#"{"kind":"futureOperation"}"#,
+                     #"{"version":999,"kind":"futureOperation","tile":"different schema"}"#] {
+            XCTAssertThrowsError(try RoomCodec.decode(Data(json.utf8))) { error in
+                guard case RoomWireError.unsupportedVersion = error else {
+                    return XCTFail("Expected version failure before payload decoding, got \(error)")
+                }
+            }
+        }
+    }
+
+    func testFixedMoveFixture() throws {
+        let id = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let json = #"{"version":\#(RoomMessage.currentVersion),"kind":"moveTile","tileID":"11111111-1111-1111-1111-111111111111","x":12.5,"y":-9}"#
+        XCTAssertEqual(try RoomCodec.decode(Data(json.utf8)),
+                       .moveTile(id, x: 12.5, y: -9))
+    }
+
+    func testPayloadByteLimitAppliesBeforeDecoding() {
+        XCTAssertThrowsError(try RoomCodec.decode(Data(repeating: 32, count: RoomLimits.maxPayloadBytes + 1))) { error in
+            guard case RoomWireError.payloadTooLarge = error else { return XCTFail("Expected byte limit, got \(error)") }
         }
     }
 
@@ -72,12 +125,6 @@ final class RoomCodecTests: XCTestCase {
         XCTAssertEqual(decoded.card?.text.count, RoomLimits.maxTextLength)
         XCTAssertEqual(decoded.x, -RoomLimits.coordinateLimit)
         XCTAssertEqual(decoded.y, RoomLimits.coordinateLimit)
-    }
-
-    func testAStampFromTheFutureIsPulledBack() throws {
-        let future = Date().addingTimeInterval(3_600)
-        guard case .moveTile(_, _, _, let stamp) = try roundTrip(.moveTile(UUID(), x: 0, y: 0, stamp: future)) else { return XCTFail("not a move") }
-        XCTAssertLessThan(stamp, Date().addingTimeInterval(RoomLimits.maxClockSkew + 1))
     }
 
     func testSnapshotDropsDuplicateTilesAndMembers() throws {

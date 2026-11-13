@@ -24,6 +24,7 @@ struct OpenAIProvider: ChatProvider {
                     continuation.finish(throwing: error)
                 }
             }
+            handle.bind(cancel: { task.cancel() })
             continuation.onTermination = { _ in task.cancel() }
         }
     }

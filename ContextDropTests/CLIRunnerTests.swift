@@ -41,7 +41,7 @@ final class CLIRunnerTests: XCTestCase {
         CLIRunner.Request(folder: FileManager.default.temporaryDirectory, prompt: "hello", level: .ask)
     }
 
-    private func collect(_ agent: ShellAgent, handle: RunHandle = RunHandle()) async throws -> [ProviderEvent] {
+    private func collect(_ agent: ShellAgent, handle: CLIRunner.Handle = CLIRunner.Handle()) async throws -> [ProviderEvent] {
         var events: [ProviderEvent] = []
         for try await event in CLIRunner.run(agent, request, handle: handle) { events.append(event) }
         return events
@@ -87,7 +87,7 @@ final class CLIRunnerTests: XCTestCase {
     }
 
     func testStopEndsTheRunWithoutAnError() async throws {
-        let handle = RunHandle()
+        let handle = CLIRunner.Handle()
         let started = Date()
         var texts: [String] = []
         for try await event in CLIRunner.run(ShellAgent(script: "echo started; sleep 60"), request, handle: handle) {
@@ -112,7 +112,7 @@ final class CLIRunnerTests: XCTestCase {
         let status = await CLIRunner.status(of: Missing())
         XCTAssertEqual(status, .notFound("contextdrop-no-such-cli CLI not found on this Mac"))
         do {
-            for try await _ in CLIRunner.run(Missing(), request, handle: RunHandle()) {}
+            for try await _ in CLIRunner.run(Missing(), request, handle: CLIRunner.Handle()) {}
             XCTFail("expected an error")
         } catch {
             XCTAssertEqual((error as? ProviderError)?.failure, .notInstalled)

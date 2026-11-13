@@ -120,7 +120,7 @@ final class RoomRunBroadcaster {
             root.flatMap { FolderDrop.relative(path, to: $0) } ?? (path as NSString).abbreviatingWithTildeInPath
         }
 
-        var run = RoomRunTile(ownerName: me,
+        var run = RoomRunTile(ownerName: me, ownerID: store.localID,
                               agent: conversation.provider.displayName,
                               title: line(conversation.title),
                               folder: conversation.folder.map { FolderDrop.display($0) } ?? "")

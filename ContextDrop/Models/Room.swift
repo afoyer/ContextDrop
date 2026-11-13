@@ -35,11 +35,7 @@ enum RoomLimits {
     static let coordinateLimit: Double = 1_000_000
     static let maxPayloadBytes = 16 * 1024 * 1024
     static let maxInvitationBytes = 2 * 1024
-    /// How far ahead of our clock a remote timestamp may be before it is pulled back.
-    static let maxClockSkew: TimeInterval = 2
-
     static func clampCoordinate(_ v: Double) -> Double { v.isFinite ? min(max(v, -coordinateLimit), coordinateLimit) : 0 }
-    static func clampStamp(_ stamp: Date) -> Date { min(stamp, Date().addingTimeInterval(maxClockSkew)) }
     static func name(_ raw: String) -> String { String(raw.prefix(maxNameLength)) }
 }
 
@@ -98,6 +94,7 @@ struct RoomFile: Codable, Sendable, Equatable, Identifiable {
     var kind: Kind
     var size: Int
     var addedBy: String
+    var addedByID: String = ""
     /// A small JPEG for the file strip (images only).
     var thumbnail: Data?
     var status: Status
@@ -108,6 +105,7 @@ struct RoomFile: Codable, Sendable, Equatable, Identifiable {
                  kind: kind,
                  size: min(max(size, 0), RoomLimits.maxFileBytes),
                  addedBy: RoomLimits.name(addedBy),
+                 addedByID: RoomLimits.name(addedByID),
                  thumbnail: (thumbnail?.count ?? 0) <= RoomLimits.maxThumbnailBytes ? thumbnail : nil,
                  status: status.sanitized())
     }
@@ -127,6 +125,7 @@ struct RoomChatMessage: Codable, Sendable, Equatable, Identifiable {
     var sawRuns = false
     var streaming = false
     var failed = false
+    var failureReason: String? = nil
     var createdAt = Date()
 
     func sanitized() -> RoomChatMessage {
@@ -134,7 +133,8 @@ struct RoomChatMessage: Codable, Sendable, Equatable, Identifiable {
         m.author = RoomLimits.name(author)
         m.text = String(text.prefix(RoomLimits.maxTextLength))
         m.sawFiles = sawFiles.prefix(RoomLimits.maxFilesPerChat).map { String($0.prefix(RoomLimits.maxFileNameLength)) }
-        m.createdAt = RoomLimits.clampStamp(createdAt)
+        m.failureReason = failureReason.map { String($0.prefix(160)) }
+        m.createdAt = createdAt
         return m
     }
 }
@@ -143,6 +143,7 @@ struct RoomChatMessage: Codable, Sendable, Equatable, Identifiable {
 struct RoomChatTile: Codable, Sendable, Equatable {
     var title: String
     var ownerName: String
+    var ownerID: String = ""
     /// The owner's OpenAI model, for display.
     var model: String
     var messages: [RoomChatMessage] = []
@@ -172,6 +173,7 @@ struct RoomChatTile: Codable, Sendable, Equatable {
         var t = self
         t.title = String(title.prefix(RoomLimits.maxTitleLength))
         t.ownerName = RoomLimits.name(ownerName)
+        t.ownerID = RoomLimits.name(ownerID)
         t.model = String(model.prefix(60))
         t.messages = messages.suffix(RoomLimits.maxChatMessages).map { $0.sanitized() }.filter { seenMessages.insert($0.id).inserted }
         t.files = files.prefix(RoomLimits.maxFilesPerChat).map { $0.sanitized() }.filter { seenFiles.insert($0.id).inserted }
@@ -212,6 +214,7 @@ struct RunLogLine: Codable, Sendable, Equatable, Hashable, Identifiable {
 struct RunNote: Codable, Sendable, Equatable, Identifiable {
     let id: UUID
     var from: String
+    var fromID: String = ""
     var text: String
 }
 
@@ -225,6 +228,7 @@ struct RunRequest: Codable, Sendable, Equatable, Identifiable {
 
     let id: UUID
     var from: String
+    var fromID: String = ""
     var text: String
     var files: [RoomFile] = []
     var status: Status = .pending
@@ -236,6 +240,7 @@ struct RunRequest: Codable, Sendable, Equatable, Identifiable {
         var seen = Set<UUID>()
         var r = self
         r.from = RoomLimits.name(from)
+        r.fromID = RoomLimits.name(fromID)
         r.text = String(text.prefix(RoomLimits.maxQuestionLength))
         r.files = files.prefix(RoomLimits.maxFilesPerRequest).map { $0.sanitized() }.filter { seen.insert($0.id).inserted }
         return r
@@ -254,6 +259,7 @@ struct RoomRunTile: Codable, Sendable, Equatable {
     }
 
     var ownerName: String
+    var ownerID: String = ""
     /// The coding agent's name ("Claude Code", "Codex").
     var agent = "Claude Code"
     var title: String
@@ -312,12 +318,13 @@ struct RoomRunTile: Codable, Sendable, Equatable {
     func sanitized() -> RoomRunTile {
         var t = self
         t.ownerName = RoomLimits.name(ownerName)
+        t.ownerID = RoomLimits.name(ownerID)
         t.agent = String(agent.prefix(40))
         t.title = String(title.prefix(RoomLimits.maxTitleLength))
         t.folder = String(folder.prefix(120))
         if case .waiting(let reason) = state { t.state = .waiting(String(reason.prefix(200))) }
-        t.startedAt = startedAt.map(RoomLimits.clampStamp)
-        t.endedAt = endedAt.map(RoomLimits.clampStamp)
+        t.startedAt = startedAt
+        t.endedAt = endedAt
         t.plan = plan.prefix(RoomLimits.maxPlanSteps).map { RunPlanStep(text: String($0.text.prefix(160)), status: $0.status) }
         t.subagents = subagents.prefix(RoomLimits.maxSubagents).map {
             RunSubagentInfo(type: String($0.type.prefix(40)), task: String($0.task.prefix(120)), running: $0.running)
@@ -356,7 +363,7 @@ extension RoomFile {
 
 extension RunNote {
     func sanitized() -> RunNote {
-        RunNote(id: id, from: RoomLimits.name(from), text: String(text.prefix(RoomLimits.maxNoteLength)))
+        RunNote(id: id, from: RoomLimits.name(from), fromID: RoomLimits.name(fromID), text: String(text.prefix(RoomLimits.maxNoteLength)))
     }
 }
 
@@ -382,11 +389,8 @@ struct RoomTile: Codable, Sendable, Equatable, Identifiable {
     var x: Double
     var y: Double
     var addedBy: String
+    var addedByID: String = ""
     var collapsed = false
-    /// Last position change (last-write-wins for moves).
-    var movedAt: Date
-    /// Last text or collapse change (last-write-wins).
-    var updatedAt: Date
     var content: RoomTileContent
 
     var position: CGPoint { CGPoint(x: x, y: y) }
@@ -401,6 +405,13 @@ struct RoomTile: Codable, Sendable, Equatable, Identifiable {
         case .card: addedBy
         case .chat(let chat): chat.ownerName
         case .run(let run): run.ownerName
+        }
+    }
+    var ownerID: String {
+        switch content {
+        case .card: addedByID
+        case .chat(let chat): chat.ownerID
+        case .run(let run): run.ownerID
         }
     }
 
@@ -440,14 +451,13 @@ struct RoomTile: Codable, Sendable, Equatable, Identifiable {
                  x: RoomLimits.clampCoordinate(x),
                  y: RoomLimits.clampCoordinate(y),
                  addedBy: RoomLimits.name(addedBy),
+                 addedByID: RoomLimits.name(addedByID),
                  collapsed: collapsed,
-                 movedAt: RoomLimits.clampStamp(movedAt),
-                 updatedAt: RoomLimits.clampStamp(updatedAt),
                  content: content.sanitized())
     }
 }
 
-/// Someone at the table. `id` is the peer's display name (unique enough for a hackathon room).
+/// Someone at the table. `id` is a stable installation UUID; `name` is display-only.
 struct RoomMember: Codable, Sendable, Equatable, Identifiable {
     let id: String
     var name: String
@@ -462,6 +472,7 @@ struct RoomState: Codable, Sendable, Equatable, Identifiable {
     let id: UUID
     var name: String
     var hostName: String
+    var hostID: String = ""
     var members: [RoomMember]
     var tiles: [RoomTile]
 
@@ -472,6 +483,7 @@ struct RoomState: Codable, Sendable, Equatable, Identifiable {
             id: id,
             name: String(name.prefix(RoomLimits.maxRoomNameLength)),
             hostName: RoomLimits.name(hostName),
+            hostID: RoomLimits.name(hostID),
             members: members.prefix(RoomLimits.maxMembers).map { $0.sanitized() }.filter { !$0.id.isEmpty && seenMembers.insert($0.id).inserted },
             tiles: tiles.prefix(RoomLimits.maxTiles).map { $0.sanitized() }.filter { seenTiles.insert($0.id).inserted })
     }
@@ -483,12 +495,13 @@ struct RoomInvitation: Codable, Sendable, Equatable, Identifiable {
     var name: String
     var hostName: String
     var memberCount: Int
+    var version: Int? = RoomMessage.currentVersion
 
     func sanitized() -> RoomInvitation {
         RoomInvitation(id: id,
                        name: String(name.prefix(RoomLimits.maxRoomNameLength)),
                        hostName: RoomLimits.name(hostName),
-                       memberCount: min(max(memberCount, 1), RoomLimits.maxMembers))
+                       memberCount: min(max(memberCount, 1), RoomLimits.maxMembers), version: version)
     }
 }
 
@@ -500,18 +513,22 @@ struct RoomInvitationContext: Codable, Sendable {
 // MARK: - Wire
 
 /// One change to the room. Each is sent as one JSON message on the room session (see `RoomWire`).
-enum RoomMessage: Sendable, Equatable {
+indirect enum RoomMessage: Sendable, Equatable {
     /// 3: run tiles carry `agent` and `requests` (continuing a run from the room).
-    static let currentVersion = 3
+    static let currentVersion = 4
 
     enum Kind: String, Codable, Sendable {
-        case hello, snapshot, memberLeft, ended
+        case hello, snapshot, memberLeft, ended, rejected
         case addTile, moveTile, editTile, removeTile, setCollapsed
         case chatMessage, chatDelta
         case addFile, fileStatus, removeFile, requestFiles
         case attachRun, runUpdate, runNote
         case runRequest, runRequestStatus
     }
+
+    case submit(UUID, RoomMessage)
+    case accepted(UUID, RoomMessage)
+    case rejected(UUID, String)
 
     case hello(RoomMember)
     case snapshot(RoomState)
@@ -520,10 +537,10 @@ enum RoomMessage: Sendable, Equatable {
     case ended
 
     case addTile(RoomTile)
-    case moveTile(UUID, x: Double, y: Double, stamp: Date)
-    case editTile(UUID, text: String, stamp: Date)
+    case moveTile(UUID, x: Double, y: Double)
+    case editTile(UUID, text: String)
     case removeTile(UUID)
-    case setCollapsed(UUID, Bool, stamp: Date)
+    case setCollapsed(UUID, Bool)
 
     case chatMessage(UUID, RoomChatMessage)
     /// The reply as it stands (the whole text so far, not an increment), so a lost or reordered batch
@@ -550,6 +567,8 @@ enum RoomMessage: Sendable, Equatable {
 
     var kind: Kind {
         switch self {
+        case .submit(_, let change), .accepted(_, let change): change.kind
+        case .rejected: .rejected
         case .hello: .hello
         case .snapshot: .snapshot
         case .memberLeft: .memberLeft
@@ -593,6 +612,9 @@ enum RoomWireError: Error, CustomStringConvertible {
 private struct RoomWire: Codable {
     var version = RoomMessage.currentVersion
     let kind: RoomMessage.Kind
+    var operationID: UUID?
+    var outcome: String?
+    var reason: String?
     /// Who made the change (`by` in `RoomMessage`).
     var from: String?
     var member: RoomMember?
@@ -604,7 +626,6 @@ private struct RoomWire: Codable {
     var x: Double?
     var y: Double?
     var text: String?
-    var stamp: Date?
     var memberID: String?
     var flag: Bool?
     var chat: RoomChatMessage?
@@ -622,17 +643,28 @@ private struct RoomWire: Codable {
 
 extension RoomWire {
     init(_ message: RoomMessage) {
+        switch message {
+        case .submit(let id, let change), .accepted(let id, let change):
+            self.init(change)
+            operationID = id
+            if case .submit = message { outcome = "submitted" } else { outcome = "accepted" }
+            return
+        default: break
+        }
         self.init(kind: message.kind)
         switch message {
+        case .submit, .accepted: break
+        case .rejected(let id, let text): operationID = id; reason = text
+
         case .hello(let value): member = value
         case .snapshot(let value): state = value
         case .memberLeft(let id): memberID = id
         case .ended: break
         case .addTile(let value): tile = value
-        case .moveTile(let id, let x, let y, let stamp): (tileID, self.x, self.y, self.stamp) = (id, x, y, stamp)
-        case .editTile(let id, let text, let stamp): (tileID, self.text, self.stamp) = (id, text, stamp)
+        case .moveTile(let id, let x, let y): (tileID, self.x, self.y) = (id, x, y)
+        case .editTile(let id, let text): (tileID, self.text) = (id, text)
         case .removeTile(let id): tileID = id
-        case .setCollapsed(let id, let collapsed, let stamp): (tileID, flag, self.stamp) = (id, collapsed, stamp)
+        case .setCollapsed(let id, let collapsed): (tileID, flag) = (id, collapsed)
         case .chatMessage(let id, let value), .chatDelta(let id, let value): (tileID, chat) = (id, value)
         case .addFile(let id, let value): (tileID, file) = (id, value)
         case .fileStatus(let id, let fileID, let status): (tileID, self.fileID, fileStatus) = (id, fileID, status)
@@ -648,10 +680,27 @@ extension RoomWire {
 
     /// The message this stands for, with everything cut down to size. Throws when a field its kind needs is missing.
     func message() throws -> RoomMessage {
+        let change = try payload()
+        if kind == .rejected { return change }
+        guard let operationID else {
+            guard outcome == nil else { throw RoomWireError.missingPayload(kind) }
+            return change
+        }
+        switch outcome {
+        case "submitted": return .submit(operationID, change)
+        case "accepted": return .accepted(operationID, change)
+        default: throw RoomWireError.missingPayload(kind)
+        }
+    }
+
+    private func payload() throws -> RoomMessage {
         guard version == RoomMessage.currentVersion else { throw RoomWireError.unsupportedVersion(version) }
         let missing = RoomWireError.missingPayload(kind)
         let by = from.map(RoomLimits.name)
         switch kind {
+        case .rejected:
+            guard let operationID, let reason else { throw missing }
+            return .rejected(operationID, String(reason.prefix(240)))
         case .hello:
             guard let member = member?.sanitized(), !member.id.isEmpty else { throw missing }
             return .hello(member)
@@ -667,17 +716,17 @@ extension RoomWire {
             guard let tile else { throw missing }
             return .addTile(tile.sanitized())
         case .moveTile:
-            guard let tileID, let x, let y, let stamp else { throw missing }
-            return .moveTile(tileID, x: RoomLimits.clampCoordinate(x), y: RoomLimits.clampCoordinate(y), stamp: RoomLimits.clampStamp(stamp))
+            guard let tileID, let x, let y else { throw missing }
+            return .moveTile(tileID, x: RoomLimits.clampCoordinate(x), y: RoomLimits.clampCoordinate(y))
         case .editTile:
-            guard let tileID, let text, let stamp else { throw missing }
-            return .editTile(tileID, text: String(text.prefix(RoomLimits.maxTextLength)), stamp: RoomLimits.clampStamp(stamp))
+            guard let tileID, let text else { throw missing }
+            return .editTile(tileID, text: String(text.prefix(RoomLimits.maxTextLength)))
         case .removeTile:
             guard let tileID else { throw missing }
             return .removeTile(tileID)
         case .setCollapsed:
-            guard let tileID, let flag, let stamp else { throw missing }
-            return .setCollapsed(tileID, flag, stamp: RoomLimits.clampStamp(stamp))
+            guard let tileID, let flag else { throw missing }
+            return .setCollapsed(tileID, flag)
         case .chatMessage:
             guard let tileID, let chat else { throw missing }
             return .chatMessage(tileID, chat.sanitized())
@@ -717,12 +766,19 @@ extension RoomWire {
 
 enum RoomCodec {
     static func encode(_ message: RoomMessage) throws -> Data {
-        try JSONEncoder().encode(RoomWire(message))
+        let data = try JSONEncoder().encode(RoomWire(message))
+        guard data.count <= RoomLimits.maxPayloadBytes else { throw RoomWireError.payloadTooLarge(data.count) }
+        return data
     }
 
     /// Decodes, validates and size-limits. Throws on anything malformed; never traps.
     static func decode(_ data: Data) throws -> RoomMessage {
         guard data.count <= RoomLimits.maxPayloadBytes else { throw RoomWireError.payloadTooLarge(data.count) }
+        struct Envelope: Decodable { var version: Int?; var kind: String }
+        let envelope = try JSONDecoder().decode(Envelope.self, from: data)
+        guard envelope.version == RoomMessage.currentVersion else {
+            throw RoomWireError.unsupportedVersion(envelope.version ?? 0)
+        }
         return try JSONDecoder().decode(RoomWire.self, from: data).message()
     }
 

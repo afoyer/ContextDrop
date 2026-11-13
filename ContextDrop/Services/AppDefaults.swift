@@ -71,12 +71,12 @@ enum AppDefaults {
     static var preferredCLI: ProviderKind {
         get {
             let saved = UserDefaults.standard.string(forKey: preferredCLIKey).flatMap(ProviderKind.init(rawValue:))
-            if let saved, saved.isDeep { return saved }
-            let initial: ProviderKind = provider.isDeep ? provider : .claudeCode
+            if let saved, saved.capabilities.requiresFolder { return saved }
+            let initial: ProviderKind = provider.capabilities.requiresFolder ? provider : .claudeCode
             UserDefaults.standard.set(initial.rawValue, forKey: preferredCLIKey)
             return initial
         }
-        set { if newValue.isDeep { UserDefaults.standard.set(newValue.rawValue, forKey: preferredCLIKey) } }
+        set { if newValue.capabilities.requiresFolder { UserDefaults.standard.set(newValue.rawValue, forKey: preferredCLIKey) } }
     }
 
     static var routeCLIByTask: Bool {

@@ -27,7 +27,7 @@ struct AutoRouter: Sendable {
     func decide(question: String, availableCLIs: [ProviderKind], preferredCLI: ProviderKind,
                 shortcuts: [FolderShortcut], defaultFolder: String?, selectedFolder: String?,
                 workPreferences: String?) async -> RouteDecision {
-        guard availableCLIs.contains(where: \.isDeep) else {
+        guard availableCLIs.contains(where: \.capabilities.requiresFolder) else {
             return RouteDecision(route: .quick, folder: nil, reason: "no coding agent ready")
         }
         let decision: RouteDecision
@@ -142,6 +142,6 @@ struct AutoRouter: Sendable {
             reason += " (\(Int((confidence * 100).rounded()))% sure)"
         }
         let cli = (answer("cli")?["choice"] as? String).flatMap(ProviderKind.init(rawValue:))
-        return RouteDecision(route: route, folder: folder, reason: reason, provider: cli.flatMap { $0.isDeep ? $0 : nil } ?? .openAI)
+        return RouteDecision(route: route, folder: folder, reason: reason, provider: cli.flatMap { $0.capabilities.requiresFolder ? $0 : nil } ?? .openAI)
     }
 }

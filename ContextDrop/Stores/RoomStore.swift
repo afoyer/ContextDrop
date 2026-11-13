@@ -35,9 +35,14 @@ final class RoomStore {
     @ObservationIgnored var viewCenter = CGPoint(x: 480, y: 320)
     /// What this Mac is typing into each chat tile. Never sent; shared by the canvas tile and its popped-out tab.
     var chatDrafts: [UUID: String] = [:]
+    /// A local draft rescued when its chat tile disappears while someone is typing or sending.
+    var recoveredChatDraft: String?
+    private(set) var sendingChatTiles: Set<UUID> = []
+    private(set) var slowChatTiles: Set<UUID> = []
 
     @ObservationIgnored let peers: PeerService
-    @ObservationIgnored private let service: RoomService
+    @ObservationIgnored private let identityOverride: RoomMember?
+    @ObservationIgnored private let service: any RoomTransport
     @ObservationIgnored private(set) lazy var engine = RoomChatEngine(store: self)
     @ObservationIgnored private(set) lazy var runs = RoomRunBroadcaster(store: self)
     @ObservationIgnored private(set) lazy var inbox = RoomRunInbox(store: self)
@@ -45,14 +50,30 @@ final class RoomStore {
     @ObservationIgnored private var pendingMoves: [UUID: RoomMessage] = [:]
     @ObservationIgnored private var lastMoveSent: [UUID: Date] = [:]
     @ObservationIgnored private var moveFlush: Task<Void, Never>?
+    @ObservationIgnored private var sizeLedger: RoomSizeLedger?
+    @ObservationIgnored private var pending: [UUID: PendingOperation] = [:]
+    @ObservationIgnored private var pendingTileActions: [UUID: [@MainActor () -> Void]] = [:]
+    @ObservationIgnored private var pendingTileSettlements: [UUID: [@MainActor (String?) -> Void]] = [:]
+    private var localPositions: [UUID: CGPoint] = [:]
+    @ObservationIgnored private var finalMoveIDs: [UUID: UUID] = [:]
+    @ObservationIgnored private var peerMembers: [MCPeerID: String] = [:]
+    @ObservationIgnored private var seenOperations: Set<UUID> = []
+    @ObservationIgnored private var recentOperations: [UUID] = []
+    @ObservationIgnored private var rejectionReason: String?
+
+    private struct PendingOperation {
+        var message: RoomMessage
+        var finished: (@MainActor (String?) -> Void)?
+    }
 
     private static let moveInterval: TimeInterval = 1.0 / 15
     private static let maxWatchLines = 400
     static let untitledChat = RoomReducer.untitledChat
 
-    init(peers: PeerService) {
+    init(peers: PeerService, transport: (any RoomTransport)? = nil, identity: RoomMember? = nil) {
         self.peers = peers
-        service = RoomService(peers: peers)
+        identityOverride = identity
+        service = transport ?? RoomService(peers: peers)
         service.onInvitation = { [weak self] invitation in self?.onInvitation?(invitation) }
         service.onInvitationsChanged = { [weak self] in self?.onChange?() }
         service.onMessage = { [weak self] message, peerID in self?.handle(message, from: peerID) }
@@ -60,6 +81,7 @@ final class RoomStore {
         service.onPeerDisconnected = { [weak self] peerID in self?.peerDisconnected(peerID) }
         service.onInviteUnanswered = { [weak self] peerID in self?.notice = "\(peerID.displayName) didn’t join." }
         service.onJoinFailed = { [weak self] in self?.joinFailed() }
+        service.onFailure = { [weak self] error in self?.notice = error }
         service.onFile = { [weak self] url, name in
             guard let self else { try? FileManager.default.removeItem(at: url); return }
             self.fileArrived(url, name: name)
@@ -73,7 +95,8 @@ final class RoomStore {
     var pendingInvitations: [RoomInvitation] { service.pendingInvitations }
     /// In a live room (not nil, not ended).
     var isActive: Bool { room != nil && !ended }
-    var localName: String { peers.localDisplayName }
+    var localName: String { identityOverride?.name ?? peers.localDisplayName }
+    var localID: String { identityOverride?.id ?? LocalIdentity.memberID }
     /// How many people are at the table, this Mac included.
     var presentCount: Int { members.count }
     /// This Mac's runs that are in the room (by conversation id) and how much of each is shown. Never sent;
@@ -82,20 +105,32 @@ final class RoomStore {
 
     /// Nearby people who are not at the table yet.
     var invitablePeers: [NearbyPeer] {
-        let here = Set(members.map(\.id))
-        return peers.nearbyPeers.filter { !here.contains($0.name) }
+        return peers.nearbyPeers.filter { peerMembers[$0.peerID] == nil }
     }
 
     func isInvited(_ peer: NearbyPeer) -> Bool { service.invitedPeers.contains(peer.peerID) }
-    func isPresent(_ name: String) -> Bool { members.contains { $0.id == name } }
+    func isPresent(_ id: String) -> Bool { members.contains { $0.id == id } }
 
     func tile(_ id: UUID) -> RoomTile? { room?.tiles.first { $0.id == id } }
-    func canEdit(_ tile: RoomTile) -> Bool { isActive && tile.card != nil && tile.addedBy == localName }
+    func whenTileAccepted(_ id: UUID, perform action: @escaping @MainActor () -> Void) {
+        if tile(id) != nil { action() }
+        else if pending.values.contains(where: { if case .addTile(let candidate) = $0.message { candidate.id == id } else { false } }) {
+            pendingTileActions[id, default: []].append(action)
+        }
+    }
+    func whenTileSettled(_ id: UUID, perform action: @escaping @MainActor (String?) -> Void) {
+        if tile(id) != nil { action(nil) }
+        else if pending.values.contains(where: { if case .addTile(let candidate) = $0.message { candidate.id == id } else { false } }) {
+            pendingTileSettlements[id, default: []].append(action)
+        }
+    }
+    func displayPosition(of tile: RoomTile) -> CGPoint { localPositions[tile.id] ?? tile.position }
+    func canEdit(_ tile: RoomTile) -> Bool { isActive && tile.card != nil && tile.addedByID == localID }
     func canRemove(_ tile: RoomTile) -> Bool {
-        isActive && (tile.addedBy == localName || tile.ownerName == localName || isHost)
+        isActive && (tile.addedByID == localID || tile.ownerID == localID || isHost)
     }
     func canRemove(_ file: RoomFile, in tile: RoomTile) -> Bool {
-        isActive && (file.addedBy == localName || tile.ownerName == localName)
+        isActive && (file.addedByID == localID || tile.ownerID == localID)
     }
 
     /// Run tiles that are running or waiting on their owner.
@@ -111,9 +146,10 @@ final class RoomStore {
         let name = trimmed.isEmpty ? "\(localName)’s table" : trimmed
         room = RoomState(id: UUID(),
                          name: String(name.prefix(RoomLimits.maxRoomNameLength)),
-                         hostName: localName,
-                         members: [RoomMember(id: localName, name: localName, isHost: true)],
+                         hostName: localName, hostID: localID,
+                         members: [RoomMember(id: localID, name: localName, isHost: true)],
                          tiles: [])
+        sizeLedger = room.flatMap { try? RoomSizeLedger(room: $0) }
         isHost = true
         service.host()
         onChange?()
@@ -122,7 +158,7 @@ final class RoomStore {
     /// Host only: asks a nearby person to join. They get an invitation that lasts 60 s.
     func invite(_ peer: NearbyPeer) {
         guard isActive, isHost, let room else { return }
-        guard !members.contains(where: { $0.id == peer.name }), !isInvited(peer) else { return }
+        guard peerMembers[peer.peerID] == nil, !isInvited(peer) else { return }
         let invitation = RoomInvitation(id: room.id, name: room.name, hostName: localName, memberCount: room.members.count)
         if !service.invite(peer.peerID, invitation: invitation) {
             notice = "A room holds up to \(RoomService.maxPeers) people."
@@ -162,10 +198,10 @@ final class RoomStore {
             return
         }
         if takingCards {
-            for tile in tiles where tile.card != nil && tile.addedBy == localName { removeTile(tile.id) }
+            for tile in tiles where tile.card != nil && tile.addedByID == localID { removeTile(tile.id) }
         }
         flushMoves()
-        service.send(isHost ? .ended : .memberLeft(localName))
+        service.send(isHost ? .ended : .memberLeft(localID))
         service.close(afterFlush: true)
         if keepForTakeHome, room?.tiles.isEmpty == false {
             stopWork()
@@ -191,8 +227,18 @@ final class RoomStore {
 
     private func reset() {
         stopWork()
+        for id in Array(pending.keys) { finishPending(id, error: "The room ended before this change was accepted.") }
+        pendingTileActions = [:]
+        pendingTileSettlements = [:]
+        localPositions = [:]
+        finalMoveIDs = [:]
+        sizeLedger = nil
+        peerMembers = [:]
+        seenOperations = []
+        recentOperations = []
         runLogs = [:]
-        chatDrafts = [:]
+        sendingChatTiles = []
+        slowChatTiles = []
         room = nil
         isHost = false
         ended = false
@@ -202,6 +248,13 @@ final class RoomStore {
 
     private func markEnded(_ message: String) {
         stopWork()
+        for id in Array(pending.keys) { finishPending(id, error: message) }
+        pendingTileActions = [:]
+        pendingTileSettlements = [:]
+        sendingChatTiles = []
+        slowChatTiles = []
+        localPositions = [:]
+        finalMoveIDs = [:]
         service.close()
         isJoining = false
         joiningRoomID = nil
@@ -225,11 +278,25 @@ final class RoomStore {
 
     /// Applies a change made on this Mac and sends it to the room. False when it was not allowed.
     @discardableResult
-    func post(_ message: RoomMessage) -> Bool {
+    func post(_ message: RoomMessage, onAccepted: (@MainActor (String?) -> Void)? = nil) -> Bool {
         guard isActive else { return false }
-        guard let applied = apply(message, sender: localName) else { return false }
-        service.send(applied)
-        afterApply(applied)
+        let id = UUID()
+        if isHost {
+            guard let applied = apply(message, sender: localID) else {
+                notice = rejectionReason ?? "The room could not apply this change."
+                return false
+            }
+            service.send(.accepted(id, applied))
+            afterApply(applied)
+            onAccepted?(nil)
+            return true
+        }
+        guard pending.count < 256 else { notice = "Too many room changes are waiting for the host."; return false }
+        pending[id] = PendingOperation(message: message, finished: onAccepted)
+        guard service.send(.submit(id, message)) else {
+            pending[id] = nil
+            return false
+        }
         return true
     }
 
@@ -242,15 +309,16 @@ final class RoomStore {
             return nil
         }
         let spot = point ?? freeSpot(near: CGPoint(x: viewCenter.x - width / 2, y: viewCenter.y - 120))
-        let now = Date()
-        return RoomTile(id: UUID(), x: spot.x, y: spot.y, addedBy: localName, movedAt: now, updatedAt: now, content: content).sanitized()
+        return RoomTile(id: UUID(), x: spot.x, y: spot.y, addedBy: localName, addedByID: localID, content: content).sanitized()
     }
 
     /// Puts a card on the canvas for everyone. A nil point means a free spot in the middle of the view.
     @discardableResult
-    func addCard(kind: RoomCardBody.Kind, text: String, caption: String? = nil, at point: CGPoint? = nil) -> UUID? {
+    func addCard(kind: RoomCardBody.Kind, text: String, caption: String? = nil, at point: CGPoint? = nil,
+                 onAccepted: (@MainActor (String?) -> Void)? = nil) -> UUID? {
         let body = RoomCardBody(kind: kind, text: text.trimmingCharacters(in: .whitespacesAndNewlines), caption: caption)
-        guard let tile = makeTile(.card(body), at: point, width: RoomMetrics.cardWidth), post(.addTile(tile)) else { return nil }
+        guard let tile = makeTile(.card(body), at: point, width: RoomMetrics.cardWidth),
+              post(.addTile(tile), onAccepted: onAccepted) else { return nil }
         return tile.id
     }
 
@@ -269,22 +337,20 @@ final class RoomStore {
     /// and the network gets at most ~15 updates a second plus the final position.
     func moveTile(_ id: UUID, to point: CGPoint) {
         guard isActive, let tile = tile(id) else { return }
-        let x = RoomLimits.clampCoordinate(point.x), y = RoomLimits.clampCoordinate(point.y)
-        guard tile.x != x || tile.y != y else { return }
+        let position = CGPoint(x: RoomLimits.clampCoordinate(point.x), y: RoomLimits.clampCoordinate(point.y))
+        guard displayPosition(of: tile) != position else { return }
+        localPositions[id] = position
+        let message = RoomMessage.moveTile(id, x: position.x, y: position.y)
         let now = Date()
-        guard let message = apply(.moveTile(id, x: x, y: y, stamp: Self.stamp(after: tile.movedAt)), sender: localName) else { return }
         if now.timeIntervalSince(lastMoveSent[id] ?? .distantPast) >= Self.moveInterval {
             lastMoveSent[id] = now
             pendingMoves[id] = nil
-            service.send(message)
+            sendMove(message, tileID: id)
         } else {
             pendingMoves[id] = message
             scheduleMoveFlush()
         }
     }
-
-    /// Always later than what we have seen, so a local change wins even when another Mac's clock runs ahead.
-    private static func stamp(after previous: Date) -> Date { max(Date(), previous.addingTimeInterval(0.001)) }
 
     private func scheduleMoveFlush() {
         guard moveFlush == nil else { return }
@@ -298,17 +364,37 @@ final class RoomStore {
 
     private func flushMoves() {
         let now = Date()
-        for (id, message) in pendingMoves {
-            lastMoveSent[id] = now
-            service.send(message)
-        }
+        let moves = pendingMoves
         pendingMoves = [:]
+        for (id, message) in moves {
+            lastMoveSent[id] = now
+            sendMove(message, tileID: id)
+        }
+    }
+
+    private func sendMove(_ message: RoomMessage, tileID: UUID) {
+        if isHost {
+            _ = post(message)
+            localPositions[tileID] = nil
+            return
+        }
+        let operationID = UUID()
+        guard pending.count < 256 else { notice = "Too many room changes are waiting for the host."; return }
+        pending[operationID] = PendingOperation(message: message, finished: nil)
+        finalMoveIDs[tileID] = operationID
+        guard service.send(.submit(operationID, message)) else {
+            pending[operationID] = nil
+            finalMoveIDs[tileID] = nil
+            localPositions[tileID] = nil
+            return
+        }
     }
 
     /// Changes the text of one of your own cards.
-    func editCard(_ id: UUID, text: String) {
-        guard let tile = tile(id), canEdit(tile) else { return }
-        post(.editTile(id, text: text.trimmingCharacters(in: .whitespacesAndNewlines), stamp: Self.stamp(after: tile.updatedAt)))
+    @discardableResult
+    func editCard(_ id: UUID, text: String, onAccepted: (@MainActor (String?) -> Void)? = nil) -> Bool {
+        guard let tile = tile(id), canEdit(tile) else { return false }
+        return post(.editTile(id, text: text.trimmingCharacters(in: .whitespacesAndNewlines)), onAccepted: onAccepted)
     }
 
     /// Removes a tile you added or own (the host may remove any tile).
@@ -321,7 +407,7 @@ final class RoomStore {
 
     func setCollapsed(_ id: UUID, _ collapsed: Bool) {
         guard let tile = tile(id), tile.collapsed != collapsed else { return }
-        post(.setCollapsed(id, collapsed, stamp: Self.stamp(after: tile.updatedAt)))
+        post(.setCollapsed(id, collapsed))
     }
 
     // MARK: Chat tiles
@@ -330,21 +416,43 @@ final class RoomStore {
     @discardableResult
     func addChatTile(title: String, messages: [RoomChatMessage] = [], files: [RoomFile] = [], runIDs: [UUID] = [],
                      spawnedFrom: [UUID] = [], spawnedLabels: [String] = [], at point: CGPoint? = nil) -> UUID? {
-        let chat = RoomChatTile(title: title, ownerName: localName, model: OpenAISettings.model, messages: messages,
+        let chat = RoomChatTile(title: title, ownerName: localName, ownerID: localID, model: OpenAISettings.model, messages: messages,
                                 files: files, runIDs: runIDs, spawnedFrom: spawnedFrom, spawnedLabels: spawnedLabels)
         guard let tile = makeTile(.chat(chat), at: point, width: RoomMetrics.chatWidth), post(.addTile(tile)) else { return nil }
         return tile.id
     }
 
     /// Anyone in the room can reply in any chat tile. The answer comes from the tile owner's Mac.
-    func sendChat(_ text: String, in tileID: UUID) {
+    @discardableResult
+    func sendChat(_ text: String, in tileID: UUID) -> Bool {
         let trimmed = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(RoomLimits.maxQuestionLength))
-        guard isActive, !trimmed.isEmpty, let chat = tile(tileID)?.chat else { return }
-        guard isPresent(chat.ownerName) else {
+        guard isActive, !trimmed.isEmpty, !sendingChatTiles.contains(tileID), let chat = tile(tileID)?.chat else { return false }
+        guard members.contains(where: { $0.id == chat.ownerID }) else {
             notice = "\(chat.ownerName) left the room, so this chat can’t answer any more. Select it and start a new chat from it."
-            return
+            return false
         }
-        post(.chatMessage(tileID, RoomChatMessage(id: UUID(), kind: .user, author: localName, text: trimmed)))
+        sendingChatTiles.insert(tileID)
+        let submittedDraft = chatDrafts[tileID] ?? text
+        let accepted = post(.chatMessage(tileID, RoomChatMessage(id: UUID(), kind: .user, author: localName, text: trimmed)),
+                            onAccepted: { [weak self] error in
+            guard let self else { return }
+            self.sendingChatTiles.remove(tileID)
+            self.slowChatTiles.remove(tileID)
+            if error == nil, self.chatDrafts[tileID] == submittedDraft { self.chatDrafts[tileID] = nil }
+        })
+        guard accepted else {
+            sendingChatTiles.remove(tileID)
+            notice = notice ?? "Couldn’t send the message. Your draft is saved."
+            return false
+        }
+        if sendingChatTiles.contains(tileID) {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                guard let self, self.sendingChatTiles.contains(tileID) else { return }
+                self.slowChatTiles.insert(tileID)
+            }
+        }
+        return true
     }
 
     /// "Ask the room" and "New chat from selection": a new chat tile on this Mac, started from the selected
@@ -383,8 +491,11 @@ final class RoomStore {
         guard let id = addChatTile(title: title, messages: messages, files: files,
                                    runIDs: runIDs.filter { seenRuns.insert($0).inserted },
                                    spawnedFrom: sources.map(\.id), spawnedLabels: sources.map(\.shortLabel), at: spot) else { return nil }
-        for source in askOwners { post(.requestFiles(from: source, to: id)) }
-        engine.begin(id, from: sources, ask: !question.isEmpty)
+        whenTileAccepted(id) { [weak self] in
+            guard let self else { return }
+            for source in askOwners { self.post(.requestFiles(from: source, to: id)) }
+            self.engine.begin(id, from: sources, ask: !question.isEmpty)
+        }
         return id
     }
 
@@ -409,7 +520,7 @@ final class RoomStore {
     func addFile(_ url: URL, to tileID: UUID, name: String? = nil) {
         guard isActive, let chat = tile(tileID)?.chat else { return }
         let name = name ?? url.lastPathComponent
-        guard isPresent(chat.ownerName) else {
+        guard isPresent(chat.ownerID) else {
             notice = "\(chat.ownerName) left the room, so this chat can’t take new files."
             return
         }
@@ -419,20 +530,22 @@ final class RoomStore {
         }
         // Copy now: sending is asynchronous and the original may move.
         guard let (file, copy) = prepareFile(url, name: name) else { return }
-        guard post(.addFile(tileID, file)) else {
+        guard post(.addFile(tileID, file), onAccepted: { [weak self] error in
+            guard let self, error == nil else { try? FileManager.default.removeItem(at: copy); return }
+            if chat.ownerID == self.localID {
+                self.engine.ingest(copy, tileID: tileID, fileID: file.id)
+            } else {
+                let owner = chat.ownerID
+                self.service.sendFile(copy, name: Self.resourceName(tileID, file.id), toMember: owner) { [weak self] sent in
+                    try? FileManager.default.removeItem(at: copy)
+                    guard let self, !sent else { return }
+                    self.removeFile(file.id, from: tileID)
+                    self.notice = "“\(name)” couldn’t be sent to \(chat.ownerName)’s Mac."
+                }
+            }
+        }) else {
             try? FileManager.default.removeItem(at: copy)
             return
-        }
-        if chat.ownerName == localName {
-            engine.ingest(copy, tileID: tileID, fileID: file.id)
-        } else {
-            let owner = chat.ownerName
-            service.sendFile(copy, name: Self.resourceName(tileID, file.id), toMember: owner) { [weak self] sent in
-                try? FileManager.default.removeItem(at: copy)
-                guard let self, !sent else { return }
-                self.removeFile(file.id, from: tileID)
-                self.notice = "“\(name)” couldn’t be sent to \(owner)’s Mac."
-            }
         }
     }
 
@@ -453,8 +566,8 @@ final class RoomStore {
 
     /// Sends a file this Mac holds toward the owner of `tileID` (used when a chat is spawned from another owner's chat).
     func forwardFile(_ url: URL, tileID: UUID, fileID: UUID) {
-        guard isActive, let chat = tile(tileID)?.chat, chat.ownerName != localName else { return }
-        service.sendFile(url, name: Self.resourceName(tileID, fileID), toMember: chat.ownerName) { _ in }
+        guard isActive, let chat = tile(tileID)?.chat, chat.ownerID != localID else { return }
+        service.sendFile(url, name: Self.resourceName(tileID, fileID), toMember: chat.ownerID) { _ in }
     }
 
     /// File bytes arrived: for a chat or a run this Mac owns, or (on the host) to pass on to the tile's owner.
@@ -465,14 +578,14 @@ final class RoomStore {
             try? FileManager.default.removeItem(at: url)
             return
         }
-        if tile.ownerName == localName {
+        if tile.ownerID == localID {
             if tile.run != nil {
                 inbox.ingest(url, tileID: tileID, fileID: fileID)
             } else {
                 engine.ingest(url, tileID: tileID, fileID: fileID)
             }
         } else if isHost {
-            service.sendFile(url, name: name, toMember: tile.ownerName) { _ in try? FileManager.default.removeItem(at: url) }
+            service.sendFile(url, name: name, toMember: tile.ownerID) { _ in try? FileManager.default.removeItem(at: url) }
         } else {
             try? FileManager.default.removeItem(at: url)
         }
@@ -510,14 +623,14 @@ final class RoomStore {
     /// Whether this Mac can send a follow-up to a run tile now, and if not, why.
     func continueBlocker(_ tileID: UUID) -> String? {
         guard isActive, let run = tile(tileID)?.run else { return "The room has ended." }
-        guard isPresent(run.ownerName) else { return "\(run.ownerName) left the room, so this run can’t be continued here." }
+        guard isPresent(run.ownerID) else { return "\(run.ownerName) left the room, so this run can’t be continued here." }
         if run.pendingRequests.count >= RoomLimits.maxRunRequests {
-            return run.ownerName == localName
+            return run.ownerID == localID
                 ? "Run or dismiss the follow-ups waiting on this tile first."
                 : "\(run.ownerName) has \(RoomLimits.maxRunRequests) follow-ups waiting. Try again once they’ve answered some."
         }
-        if run.ownerName == localName { return inbox.blocker(for: tileID) }
-        if run.pendingRequests.contains(where: { $0.from == localName }) {
+        if run.ownerID == localID { return inbox.blocker(for: tileID) }
+        if run.pendingRequests.contains(where: { $0.fromID == localID }) {
             return "\(run.ownerName) hasn’t answered your last follow-up yet."
         }
         return nil
@@ -540,7 +653,7 @@ final class RoomStore {
             notice = "A follow-up takes up to \(RoomLimits.maxFilesPerRequest) files; the rest were left out."
         }
         guard !trimmed.isEmpty || !files.isEmpty else { return false }
-        return run.ownerName == localName
+        return run.ownerID == localID
             ? continueOwnRun(trimmed, files: files, in: tileID)
             : askToContinue(trimmed, files: files, in: tileID, owner: run.ownerName)
     }
@@ -554,34 +667,41 @@ final class RoomStore {
             return file
         }
         let request = RunRequest(id: UUID(), from: localName, text: text, files: files, status: .accepted)
-        guard post(.runRequest(tileID, request)) else {
+        guard post(.runRequest(tileID, request), onAccepted: { [weak self] error in
+            guard let self, error == nil else { self?.inbox.discard(request); return }
+            self.inbox.run(request, in: tileID)
+        }) else {
             inbox.discard(request)
             return false
         }
-        inbox.run(request, in: tileID)
         return true
     }
 
     /// Someone else's run: the follow-up waits on the tile, and its files go to the owner's Mac.
     private func askToContinue(_ text: String, files prepared: [PreparedFile], in tileID: UUID, owner: String) -> Bool {
         let request = RunRequest(id: UUID(), from: localName, text: text, files: prepared.map(\.file), status: .pending)
-        guard post(.runRequest(tileID, request)) else {
+        guard post(.runRequest(tileID, request), onAccepted: { [weak self] error in
+            guard let self, error == nil else {
+                for item in prepared { try? FileManager.default.removeItem(at: item.copy) }
+                return
+            }
+            for (file, copy) in prepared {
+                self.service.sendFile(copy, name: Self.resourceName(tileID, file.id), toMember: self.tile(tileID)?.run?.ownerID ?? "") { [weak self] sent in
+                    try? FileManager.default.removeItem(at: copy)
+                    guard let self, !sent else { return }
+                    self.notice = "“\(file.name)” couldn’t be sent to \(owner)’s Mac."
+                }
+            }
+        }) else {
             for item in prepared { try? FileManager.default.removeItem(at: item.copy) }
             return false
-        }
-        for (file, copy) in prepared {
-            service.sendFile(copy, name: Self.resourceName(tileID, file.id), toMember: owner) { [weak self] sent in
-                try? FileManager.default.removeItem(at: copy)
-                guard let self, !sent else { return }
-                self.notice = "“\(file.name)” couldn’t be sent to \(owner)’s Mac."
-            }
         }
         return true
     }
 
     /// The owner runs someone's follow-up in the run's own session. Files that never arrived are left out.
     func acceptRunRequest(_ requestID: UUID, in tileID: UUID) {
-        guard let run = tile(tileID)?.run, run.ownerName == localName,
+        guard let run = tile(tileID)?.run, run.ownerID == localID,
               let request = run.requests.first(where: { $0.id == requestID }), request.status == .pending else { return }
         if let blocker = inbox.blocker(for: tileID) {
             notice = blocker
@@ -591,16 +711,18 @@ final class RoomStore {
             notice = "\(request.from)’s files are still on their way."
             return
         }
-        guard post(.runRequestStatus(tileID, requestID: requestID, .accepted)) else { return }
-        inbox.run(request, in: tileID)
+        _ = post(.runRequestStatus(tileID, requestID: requestID, .accepted), onAccepted: { [weak self] error in
+            if error == nil { self?.inbox.run(request, in: tileID) }
+        })
     }
 
     /// The owner says no to a follow-up. Its files are deleted from this Mac.
     func dismissRunRequest(_ requestID: UUID, in tileID: UUID) {
-        guard let run = tile(tileID)?.run, run.ownerName == localName,
+        guard let run = tile(tileID)?.run, run.ownerID == localID,
               let request = run.requests.first(where: { $0.id == requestID }), request.status == .pending else { return }
-        guard post(.runRequestStatus(tileID, requestID: requestID, .dismissed)) else { return }
-        inbox.discard(request)
+        _ = post(.runRequestStatus(tileID, requestID: requestID, .dismissed), onAccepted: { [weak self] error in
+            if error == nil { self?.inbox.discard(request) }
+        })
     }
 
     /// A file checked and copied for the room, and the temporary copy that holds its bytes.
@@ -626,7 +748,7 @@ final class RoomStore {
             return nil
         }
         let kind = RoomFile.Kind.of(url)
-        let file = RoomFile(id: UUID(), name: name, kind: kind, size: size, addedBy: localName,
+        let file = RoomFile(id: UUID(), name: name, kind: kind, size: size, addedBy: localName, addedByID: localID,
                             thumbnail: kind == .image ? RoomFile.thumbnail(url) : nil, status: .sending)
         return (file, copy)
     }
@@ -644,7 +766,7 @@ final class RoomStore {
         }
         guard let snapshot = runs.snapshot(of: conversation.id, level: level),
               let tile = makeTile(.run(snapshot), at: nil, width: RoomMetrics.runWidth), post(.addTile(tile)) else { return nil }
-        runs.track(conversation.id, as: tile.id, level: level)
+        whenTileAccepted(tile.id) { [weak self] in self?.runs.track(conversation.id, as: tile.id, level: level) }
         return tile.id
     }
 
@@ -671,8 +793,11 @@ final class RoomStore {
                             author: message.role == .user ? localName : RoomChatMessage.assistantAuthor, text: message.text, createdAt: message.createdAt)
         }
         guard let id = addChatTile(title: conversation.title, messages: Array(messages)) else { return nil }
-        for attachment in conversation.allAttachments.filter(\.isImage).prefix(RoomLimits.maxFilesPerChat) {
-            addFile(attachment.url, to: id, name: attachment.name)
+        whenTileAccepted(id) { [weak self] in
+            guard let self else { return }
+            for attachment in conversation.allAttachments.filter(\.isImage).prefix(RoomLimits.maxFilesPerChat) {
+                self.addFile(attachment.url, to: id, name: attachment.name)
+            }
         }
         return id
     }
@@ -682,12 +807,12 @@ final class RoomStore {
     private func peerConnected(_ peerID: MCPeerID) {
         // A guest introduces itself to the host and gets the snapshot back. The host waits for that hello.
         guard !isHost, service.isHostPeer(peerID) else { return }
-        service.send(.hello(RoomMember(id: localName, name: localName, isHost: false)))
+        service.send(.hello(RoomMember(id: localID, name: localName, isHost: false)))
     }
 
     private func peerDisconnected(_ peerID: MCPeerID) {
-        if isHost {
-            removeMember(peerID.displayName, relayExcept: peerID)
+        if isHost, let id = peerMembers.removeValue(forKey: peerID) {
+            removeMember(id, relayExcept: peerID)
         } else if service.isHostPeer(peerID) {
             markEnded(room == nil ? "Couldn’t join: \(peerID.displayName) closed the room." : "\(peerID.displayName) left, so the room ended.")
         }
@@ -698,6 +823,7 @@ final class RoomStore {
         guard let index = room?.members.firstIndex(where: { $0.id == id && !$0.isHost }) else { return }
         room?.members.remove(at: index)
         room?.memberGone(id)
+        if let state = room { sizeLedger = try? RoomSizeLedger(room: state) }
         service.send(.memberLeft(id), except: relayExcept)
         onChange?()
     }
@@ -714,40 +840,60 @@ final class RoomStore {
 
     private func handleAsHost(_ message: RoomMessage, from peerID: MCPeerID) {
         guard isActive, let room else { return }
-        // The sender's identity is their peer name, never what the message claims.
-        let sender = peerID.displayName
-        if case .hello = message {
-            if !room.members.contains(where: { $0.id == sender }) {
+        if case .hello(let claimed) = message {
+            guard UUID(uuidString: claimed.id) != nil, claimed.id != room.hostID else { return }
+            // A peer is bound to one installation ID for this session, independent of display name.
+            guard peerMembers[peerID] == nil || peerMembers[peerID] == claimed.id else { return }
+            guard !peerMembers.contains(where: { $0.key != peerID && $0.value == claimed.id }) else {
+                notice = "A nearby Mac tried to join using another member’s identity."
+                return
+            }
+            let member = RoomMember(id: claimed.id, name: peerID.displayName, isHost: false)
+            if !room.members.contains(where: { $0.id == member.id }) {
                 guard room.members.count < RoomLimits.maxMembers else { return }
-                let member = RoomMember(id: sender, name: sender, isHost: false)
                 self.room?.members.append(member)
+                if let state = self.room { sizeLedger = try? RoomSizeLedger(room: state) }
                 service.send(.hello(member), except: peerID)
                 onChange?()
             }
+            peerMembers[peerID] = member.id
+            service.bindMember(member.id, to: peerID)
             if let state = self.room { service.send(.snapshot(state), to: [peerID]) }
             return
         }
-        // Everything else only from people who are at the table.
-        guard room.members.contains(where: { $0.id == sender && !$0.isHost }) else { return }
+        guard let sender = peerMembers[peerID], room.members.contains(where: { $0.id == sender && !$0.isHost }) else { return }
         switch message {
         case .memberLeft:
             removeMember(sender, relayExcept: peerID)
-        case .hello, .snapshot, .ended:
-            break // only the host sends these
-        default:
-            guard let applied = apply(message, sender: sender) else { return }
-            service.send(applied, except: peerID)
+        case .submit(let operationID, let change):
+            guard seenOperations.insert(operationID).inserted else {
+                service.send(.rejected(operationID, "This change was already processed."), to: [peerID])
+                return
+            }
+            recentOperations.append(operationID)
+            if recentOperations.count > 1_024 { seenOperations.remove(recentOperations.removeFirst()) }
+            guard let applied = apply(change, sender: sender) else {
+                let reason = rejectionReason ?? "The host could not apply this change."
+                if case .chatDelta(let tileID, let attempted) = change,
+                   reason.contains("room is full") {
+                    settleFullStream(tileID: tileID, answerID: attempted.id)
+                }
+                service.send(.rejected(operationID, reason), to: [peerID])
+                return
+            }
+            service.send(.accepted(operationID, applied))
             afterApply(applied)
+        default:
+            break // guests cannot send control messages or unwrapped changes
         }
     }
 
     private func handleAsGuest(_ message: RoomMessage) {
-        if case .snapshot(var state) = message {
-            guard isJoining ? state.id == joiningRoomID : state.id == room?.id, !ended else { return }
-            if !state.members.contains(where: { $0.id == localName }) {
-                state.members.append(RoomMember(id: localName, name: localName, isHost: false))
-            }
+        if case .snapshot(let state) = message {
+            guard isJoining ? state.id == joiningRoomID : state.id == room?.id, !ended,
+                  state.members.contains(where: { $0.id == localID }) else { return }
             room = state
+            sizeLedger = try? RoomSizeLedger(room: state)
             isJoining = false
             joiningRoomID = nil
             onChange?()
@@ -758,21 +904,53 @@ final class RoomStore {
         case .hello(let member):
             guard room.members.count < RoomLimits.maxMembers,
                   !room.members.contains(where: { $0.id == member.id }) else { return }
-            self.room?.members.append(RoomMember(id: member.id, name: member.name, isHost: false))
+            self.room?.members.append(member)
             onChange?()
         case .memberLeft(let id):
-            guard id != localName else { return }
+            guard id != localID else { return }
             self.room?.members.removeAll { $0.id == id && !$0.isHost }
             self.room?.memberGone(id)
             onChange?()
         case .ended:
             markEnded("\(room.hostName) ended the room.")
-        case .snapshot:
-            break
+        case .rejected(let id, let reason):
+            finishPending(id, error: reason)
+        case .accepted(let id, let change):
+            if let applied = apply(change, sender: nil) { afterApply(applied) }
+            finishPending(id, error: nil)
         default:
-            // The host already checked it and stamped who it came from.
-            if let applied = apply(message, sender: nil) { afterApply(applied) }
+            break // only host-confirmed changes can mutate a guest room
         }
+    }
+
+    private func finishPending(_ id: UUID, error: String?) {
+        guard let operation = pending.removeValue(forKey: id) else { return }
+        if let error { notice = error }
+        switch operation.message {
+        case .addTile(let tile):
+            if error == nil { for action in pendingTileActions.removeValue(forKey: tile.id) ?? [] { action() } }
+            else { pendingTileActions[tile.id] = nil }
+            for action in pendingTileSettlements.removeValue(forKey: tile.id) ?? [] { action(error) }
+        case .moveTile(let tileID, _, _):
+            if finalMoveIDs[tileID] == id && pendingMoves[tileID] == nil {
+                localPositions[tileID] = nil
+                finalMoveIDs[tileID] = nil
+            }
+        default: break
+        }
+        operation.finished?(error)
+    }
+
+    private func settleFullStream(tileID: UUID, answerID: UUID) {
+        guard let accepted = tile(tileID)?.chat?.messages.first(where: { $0.id == answerID && $0.streaming }) else { return }
+        var stopped = accepted
+        stopped.streaming = false
+        stopped.failed = false
+        stopped.failureReason = "Room capacity reached. Remove content before continuing."
+        let change = RoomMessage.chatDelta(tileID, stopped)
+        guard let applied = apply(change, sender: nil) else { return }
+        service.send(.accepted(UUID(), applied))
+        afterApply(applied)
     }
 
     // MARK: Applying a change
@@ -780,15 +958,36 @@ final class RoomStore {
     /// Applies one change by the room's rules (`RoomReducer`). Returns the message to relay, with authorship
     /// stamped, or nil when the change was refused or is stale.
     private func apply(_ message: RoomMessage, sender: String?) -> RoomMessage? {
-        guard var state = room, let applied = RoomReducer.apply(message, to: &state, sender: sender) else { return nil }
+        rejectionReason = nil
+        guard var state = room, let applied = RoomReducer.apply(message, to: &state, sender: sender) else {
+            rejectionReason = "The change is no longer allowed or its target is gone."
+            return nil
+        }
+        if isHost {
+            do {
+                let ledger: RoomSizeLedger
+                if let existing = sizeLedger { ledger = existing }
+                else { ledger = try RoomSizeLedger(room: room!) }
+                let terminal: Bool
+                if case .chatDelta(_, let reply) = applied { terminal = reply.failureReason != nil && !reply.streaming }
+                else { terminal = false }
+                guard let next = try ledger.admitting(state, change: applied, terminal: terminal) else {
+                    rejectionReason = "The room is full. Remove content before adding more."
+                    return nil
+                }
+                sizeLedger = next
+            } catch {
+                rejectionReason = "The room is too large to send to a new member."
+                return nil
+            }
+        }
         room = state
         switch applied {
         case .addTile(let tile):
             if let run = tile.run { mergeLog(run.log, into: tile.id) }
         case .runUpdate(let id, let run):
             mergeLog(run.log, into: id)
-        default:
-            break
+        default: break
         }
         return applied
     }
@@ -811,34 +1010,42 @@ final class RoomStore {
     /// What this Mac does because of a change (as the owner of a chat or a run).
     private func afterApply(_ message: RoomMessage) {
         switch message {
+        case .chatDelta(let id, let reply):
+            if reply.failureReason != nil && tile(id)?.chat?.ownerID == localID {
+                engine.stopReply(id)
+            }
         case .chatMessage(let id, let chat):
-            guard chat.kind == .user, tile(id)?.chat?.ownerName == localName else { return }
+            guard chat.kind == .user, tile(id)?.chat?.ownerID == localID else { return }
             engine.userMessageArrived(id)
         case .addFile(let id, let file):
-            guard tile(id)?.chat?.ownerName == localName, file.addedBy != localName else { return }
+            guard tile(id)?.chat?.ownerID == localID, file.addedByID != localID else { return }
             engine.expectFile(file.id, in: id)
         case .removeFile(_, let fileID, _, _):
             engine.forgetFile(fileID)
         case .requestFiles(let source, let target):
-            guard tile(source)?.chat?.ownerName == localName else { return }
+            guard tile(source)?.chat?.ownerID == localID else { return }
             engine.sendFiles(from: source, to: target)
         case .removeTile(let id):
             engine.tileRemoved(id)
             runs.tileRemoved(id)
             inbox.tileRemoved(id)
             runLogs[id] = nil
+            if let draft = chatDrafts[id], !draft.isEmpty {
+                recoveredChatDraft = draft
+                notice = "The chat was removed. Your unsent text is saved."
+            }
             chatDrafts[id] = nil
         case .runNote(let id, let note):
-            guard let run = tile(id)?.run, run.ownerName == localName, note.from != localName else { return }
+            guard let run = tile(id)?.run, run.ownerID == localID, note.fromID != localID else { return }
             notice = "\(note.from) about “\(run.title)”: \(note.text)"
         case .runRequest(let id, let request):
-            guard let run = tile(id)?.run, run.ownerName == localName, request.from != localName else { return }
+            guard let run = tile(id)?.run, run.ownerID == localID, request.fromID != localID else { return }
             inbox.expectFiles(of: request, in: id)
             let files = request.files.isEmpty ? "" : " with \(request.files.count) file\(request.files.count == 1 ? "" : "s")"
             notice = "\(request.from) wants to continue “\(run.title)”\(files). Run or dismiss it on the tile."
         case .runRequestStatus(let id, let requestID, let status):
-            guard let run = tile(id)?.run, run.ownerName != localName,
-                  run.requests.first(where: { $0.id == requestID })?.from == localName else { return }
+            guard let run = tile(id)?.run, run.ownerID != localID,
+                  run.requests.first(where: { $0.id == requestID })?.fromID == localID else { return }
             notice = status == .accepted
                 ? "\(run.ownerName) ran your follow-up on “\(run.title)”."
                 : "\(run.ownerName) dismissed your follow-up on “\(run.title)”."

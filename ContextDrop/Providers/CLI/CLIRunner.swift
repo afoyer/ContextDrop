@@ -43,7 +43,7 @@ enum CLIRunner {
             }
         }
 
-        fileprivate func write(_ object: [String: Any]) {
+        func write(_ object: [String: Any]) {
             guard var data = try? JSONSerialization.data(withJSONObject: object) else { return }
             data.append(10)
             lock.withLock { try? input?.write(contentsOf: data) }
@@ -54,19 +54,6 @@ enum CLIRunner {
                 try? input?.close()
                 input = nil
             }
-        }
-
-        /// Answers a paused permission request or question. `input` is the tool input to run with (JSON object).
-        func respond(requestID: String, allow: Bool, input: Data = Data(), message: String? = nil) {
-            var response: [String: Any]
-            if allow {
-                let object = (try? JSONSerialization.jsonObject(with: input)) as? [String: Any] ?? [:]
-                response = ["behavior": "allow", "updatedInput": object]
-            } else {
-                response = ["behavior": "deny", "message": message ?? "The user declined this."]
-            }
-            write(["type": "control_response",
-                   "response": ["subtype": "success", "request_id": requestID, "response": response]])
         }
 
         fileprivate func reject(requestID: String) {

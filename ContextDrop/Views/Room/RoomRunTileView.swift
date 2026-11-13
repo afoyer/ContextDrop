@@ -25,7 +25,7 @@ struct RoomRunTileView: View {
     /// The room's own appearance. The tile itself is always dark; its popovers follow the room.
     @Environment(\.colorScheme) private var roomScheme
 
-    private var isMine: Bool { run.ownerName == store.localName }
+    private var isMine: Bool { run.ownerID == store.localID }
     private var ownerLabel: String { isMine ? "Your Mac" : "\(run.ownerName)’s Mac" }
 
     private var accent: Color {
@@ -281,7 +281,7 @@ struct RoomRunTileView: View {
         } else {
             Button("Ask \(run.ownerName)…") { asking = true }
                 .buttonStyle(TerminalButtonStyle())
-                .disabled(!store.isActive || !store.isPresent(run.ownerName))
+                .disabled(!store.isActive || !store.isPresent(run.ownerID))
                 .popover(isPresented: $asking, arrowEdge: .bottom) { askPopover.environment(\.colorScheme, roomScheme) }
         }
         Button("Watch", action: onWatch)
@@ -542,7 +542,7 @@ struct RoomRunRequestRow: View {
     /// The follow-up text's full height, measured, so the scroll view around it is exactly as tall as it needs.
     @State private var textHeight: CGFloat = 0
 
-    private var isOwner: Bool { run.ownerName == store.localName }
+    private var isOwner: Bool { run.ownerID == store.localID }
 
     var body: some View {
         // Worked out once per draw; both the hint and the Run button use it.
@@ -627,7 +627,7 @@ struct RoomRunContinueSheet: View {
     @State private var dropTargeted = false
     @FocusState private var focused: Bool
 
-    private var isMine: Bool { run.ownerName == store.localName }
+    private var isMine: Bool { run.ownerID == store.localID }
     private var blocker: String? { store.continueBlocker(tileID) }
     private var sendable: Bool {
         blocker == nil && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty)
@@ -795,7 +795,7 @@ struct RoomRunWatchPanel: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(run?.title ?? "Run").font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text(run.map { "\($0.agent) on \($0.ownerName == store.localName ? "your" : "\($0.ownerName)’s") Mac" } ?? "This run was removed")
+                    Text(run.map { "\($0.agent) on \($0.ownerID == store.localID ? "your" : "\($0.ownerName)’s") Mac" } ?? "This run was removed")
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 4)
@@ -807,26 +807,22 @@ struct RoomRunWatchPanel: View {
             .padding(.horizontal, 12)
             .frame(height: 46)
             HairlineDivider()
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 4) {
-                        if lines.isEmpty {
-                            Text("No log lines yet. They appear here as the run works.")
-                                .font(RoomTerminal.font(11)).foregroundStyle(RoomTerminal.dim)
-                        }
-                        ForEach(lines) { line in
-                            RoomRunLogLine(text: line.text).id(line.seq)
-                        }
-                        Color.clear.frame(height: 1).id("end")
+            RoomTranscriptScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    if lines.isEmpty {
+                        Text("No log lines yet. They appear here as the run works.")
+                            .font(RoomTerminal.font(11)).foregroundStyle(RoomTerminal.dim)
                     }
-                    .padding(12)
+                    ForEach(lines) { line in
+                        RoomRunLogLine(text: line.text).id(line.seq)
+                    }
                 }
-                // The same terminal well as the tile's live log, in both appearances.
-                .background(RoomTerminal.well)
-                .environment(\.colorScheme, .dark)
-                .onAppear { proxy.scrollTo("end", anchor: .bottom) }
-                .onChange(of: lines.last?.seq) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+                .padding(12)
             }
+            .id(tileID)
+            // The same terminal well as the tile's live log, in both appearances.
+            .background(RoomTerminal.well)
+            .environment(\.colorScheme, .dark)
             HairlineDivider()
             Text("Secrets are hidden before a log leaves its Mac. You see lines from when you started watching the room.")
                 .font(.system(size: 10.5))

@@ -92,7 +92,7 @@ struct ChatView: View {
             }
             .frame(height: 42)
             // Row 2, coding agents only: where it works and what it may do.
-            if conversation.provider.isDeep {
+            if conversation.provider.capabilities.requiresFolder {
                 HStack(spacing: 8) {
                     FolderChip(model: model, conversation: conversation)
                     PermissionLevelMenu(store: store, conversation: conversation)
@@ -272,7 +272,7 @@ struct ChatView: View {
 
     private func placeholder(_ conversation: Conversation) -> String {
         if !conversation.pendingQuestions.isEmpty { return "Type your own answer…" }
-        if conversation.provider.isDeep { return "Reply to \(conversation.provider.displayName)…" }
+        if conversation.provider.capabilities.requiresFolder { return "Reply to \(conversation.provider.displayName)…" }
         return conversation.messages.isEmpty ? "Ask anything…" : "Ask a follow-up…"
     }
 
@@ -280,7 +280,7 @@ struct ChatView: View {
         let input = session
         if let result = SlashMenu.handle(press, model: model, session: input) { return result }
         if press.isBackTab {
-            guard conversation.provider.isDeep else { return .ignored }
+            guard conversation.provider.capabilities.requiresFolder else { return .ignored }
             model.cyclePermissionLevel(in: conversation.id); return .handled
         }
         let cmd = press.modifiers.contains(.command)
@@ -426,7 +426,7 @@ struct MessageBlock: View {
                 }
             }
         } else if let error = message.error {
-            ErrorCard(message: error, failure: message.failure ?? (conversation.provider.isDeep ? .agentStopped : .noResponse),
+            ErrorCard(message: error, failure: message.failure ?? (conversation.provider.capabilities.requiresFolder ? .agentStopped : .noResponse),
                       model: model, conversationID: conversation.id)
         } else {
             answer

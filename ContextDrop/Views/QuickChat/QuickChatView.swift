@@ -33,7 +33,7 @@ struct QuickChatView: View {
                         .keyboardShortcut("w", modifiers: .command)
                     Button("Next tab") { model.stepPanelTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift])
                     Button("Previous tab") { model.stepPanelTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
-                    Button("Activity") { if model.activeConversationID.flatMap({ model.store.conversation($0) })?.provider.isDeep == true { model.toggleTerminal() } }
+                    Button("Activity") { if model.activeConversationID.flatMap({ model.store.conversation($0) })?.provider.capabilities.requiresFolder == true { model.toggleTerminal() } }
                         .keyboardShortcut("a", modifiers: [.command, .option])
                     Button("Open a room") { model.actions.openRoom() }
                         .keyboardShortcut("r", modifiers: [.command, .option])
@@ -247,12 +247,12 @@ struct HomeView: View {
         }
         if !model.homeSession.skills.isEmpty { provider = .forSkills; auto = false }
         if let provider {
-            if provider.isDeep, let folder { return "Ask \(provider.displayName) in \(folder.display)" }
+            if provider.capabilities.requiresFolder, let folder { return "Ask \(provider.displayName) in \(folder.display)" }
             return "Ask \(provider.displayName)"
         }
         if auto { return "Ask · OpenAI picks a quick answer or coding agent" }
         if let folder {
-            let selected = model.store.defaultProvider.isDeep ? model.store.defaultProvider : model.store.preferredDeepProvider()
+            let selected = model.store.defaultProvider.capabilities.requiresFolder ? model.store.defaultProvider : model.store.preferredDeepProvider()
             return "Ask \(selected?.displayName ?? "a coding agent") in \(folder.display)"
         }
         return "Ask \(model.store.defaultProvider.displayName)"
@@ -377,7 +377,7 @@ struct HomeRow: View {
                     if !r.read { Circle().fill(Color.accentColor).frame(width: 8, height: 8).overlay(Circle().stroke(.white, lineWidth: 1.5)).offset(x: 3, y: -3) }
                 }
         case .chat(let c):
-            Image(systemName: c.pickedUp != nil ? "arrow.down.message" : (c.provider.isDeep ? "terminal" : "bubble.left"))
+            Image(systemName: c.pickedUp != nil ? "arrow.down.message" : (c.provider.capabilities.requiresFolder ? "terminal" : "bubble.left"))
                 .frame(width: 22)
         case .clipboard:
             Image(systemName: "doc.on.clipboard").frame(width: 22)
@@ -495,7 +495,7 @@ struct ProviderMenu: View {
                 HairlineDivider().padding(.horizontal, 10).padding(.vertical, 4)
             }
             section("Quick answers")
-            ForEach(ProviderKind.allCases.filter { !$0.isDeep }) { row($0) }
+            ForEach(ProviderKind.allCases.filter { !$0.capabilities.requiresFolder }) { row($0) }
             HairlineDivider().padding(.horizontal, 10).padding(.vertical, 4)
             section("Deep chats · runs on this Mac")
             ForEach(ProviderKind.deep) { row($0) }

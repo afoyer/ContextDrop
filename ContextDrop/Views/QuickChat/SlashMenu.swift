@@ -173,7 +173,7 @@ struct RouteCaption: View {
         HStack(spacing: 6) {
             Image(systemName: "sparkles").foregroundStyle(Color.accentColor)
             Text(text).lineLimit(1).truncationMode(.tail)
-            if decision.provider.isDeep {
+            if decision.provider.capabilities.requiresFolder {
                 Button("Use OpenAI instead") { model.store.useQuickAnswer(in: conversation.id) }
                     .buttonStyle(.link)
             }
@@ -185,7 +185,7 @@ struct RouteCaption: View {
     private var text: String {
         if decision.fellBack { return "Auto unavailable · used \(decision.provider.displayName)" }
         var parts = ["Auto → \(decision.provider.displayName)"]
-        if decision.provider.isDeep, let folder = conversation.folder { parts.append(FolderDrop.display(folder)) }
+        if decision.provider.capabilities.requiresFolder, let folder = conversation.folder { parts.append(FolderDrop.display(folder)) }
         if !decision.reason.isEmpty { parts.append(decision.reason) }
         return parts.joined(separator: " · ")
     }

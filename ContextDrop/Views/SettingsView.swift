@@ -40,6 +40,7 @@ struct SettingsView: View {
 private struct GeneralSettingsTab: View {
     let store: ChatStore
     let runSetup: () -> Void
+    @ScaledMetric(relativeTo: .title) private var logoHeight: CGFloat = 28
     @State private var name = ""
     @State private var openAtLogin = LoginItem.isEnabled
     @State private var loginMessage: String?
@@ -88,6 +89,15 @@ private struct GeneralSettingsTab: View {
                         .lineLimit(2...5)
                     Text("Describe which work each CLI should handle. Auto uses these preferences in the same routing call, and your preferred CLI when no rule fits.")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Section("Credits"){
+                HStack{
+                    Text("Made by ")
+                    Link("Aymeric Foyer", destination: URL(string:"https://aymericfoyer.com")!)
+                    Image("af").resizable()
+                        .scaledToFit()
+                        .frame(height: logoHeight)
                 }
             }
         }

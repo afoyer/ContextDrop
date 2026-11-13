@@ -31,7 +31,17 @@ struct CLIProvider: ChatProvider {
             filesInAttachments: files.contains { $0.link == nil && Attachments.contains($0.path) },
             delegate: request.delegate
         )
-        return CLIRunner.run(agent, run, handle: handle)
+        let native = CLIRunner.Handle()
+        if agent.kind == .claudeCode {
+            handle.bind(cancel: { native.interrupt() },
+                        permission: { request, allow, reason in
+                            ClaudeCodeAgent.answerPermission(request, allow: allow, reason: reason, on: native)
+                        },
+                        question: { question in ClaudeCodeAgent.answerQuestion(question, on: native) })
+        } else {
+            handle.bind(cancel: { native.interrupt() })
+        }
+        return CLIRunner.run(agent, run, handle: native)
     }
 
     /// The question, plus the links and files that go with it (the agent opens files itself).
