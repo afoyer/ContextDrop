@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private lazy var roomWindow = RoomWindowController(store: roomStore, reduceMotion: { [weak self] in self?.store.reduceMotion ?? false })
     private lazy var menuBar = MenuBarController(model: panelModel, room: roomStore)
     private(set) lazy var shortcuts = ShortcutSettings(hotKey: HotKey { [weak self] in self?.quickChat.toggle() })
+    private lazy var setup = SetupWindowController(model: SetupModel(store: store, shortcuts: shortcuts))
     private var settingsWindow: NSWindow?
     private var pendingFiles: [URL] = []
     private var launched = false
@@ -81,7 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             self.menuBar.refresh()
         }
-        peers.start()
+        // Until setup is done or put off, discovery waits for the Nearby Macs step, so macOS asks for
+        // Local Network access when the screen explains why.
+        if AppDefaults.didFinishSetup || AppDefaults.setupDeferred { peers.start() }
+        setUpSetupWindow()
 
         // The room reads this Mac's Claude Code runs (to summarise the ones put in the room) and
         // opens what is taken home as a private chat. It never sends a private chat on its own.
@@ -118,6 +122,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         for url in pendingFiles { openShareFile(url) }
         pendingFiles.removeAll()
+
+        if !AppDefaults.didFinishSetup && !AppDefaults.setupDeferred { showSetup() }
+    }
+
+    // MARK: Setup
+
+    private func setUpSetupWindow() {
+        let model = setup.model
+        model.onStartDiscovery = { [weak self] in self?.peers.start() }
+        model.onLater = { [weak self] in
+            guard let self else { return }
+            self.setup.close()
+            self.peers.start()
+            self.menuBar.refresh()
+        }
+        model.onFinish = { [weak self] in
+            guard let self else { return }
+            self.setup.close()
+            self.peers.start()
+            self.menuBar.refresh()
+            self.quickChat.show()
+        }
+    }
+
+    /// First launch, Settings › General › Run Setup Again…, or the menu bar's Finish Setup.
+    func showSetup() {
+        quickChat.hide()
+        settingsWindow?.close()
+        setup.show()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -169,6 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             self?.quickChat.show()
         }
         actions.openSettings = { [weak self] in self?.openSettings() }
+        actions.finishSetup = { [weak self] in self?.showSetup() }
         actions.openRoom = { [weak self] in self?.openRoom() }
         actions.dropCurrent = { [weak self] in
             guard let self else { return }
@@ -320,7 +354,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let maxHeight = SettingsView.maxHeight()
             let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             window.title = SettingsView.windowTitle
-            let hosting = NSHostingView(rootView: SettingsView(store: store, shortcuts: shortcuts))
+            let hosting = NSHostingView(rootView: SettingsView(store: store, shortcuts: shortcuts,
+                                                             runSetup: { [weak self] in self?.showSetup() }))
             hosting.sizingOptions = [] // the window's own limits below are the single source of truth
             window.contentView = hosting
             window.isReleasedWhenClosed = false

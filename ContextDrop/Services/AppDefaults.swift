@@ -8,6 +8,20 @@ enum AppDefaults {
     private static let shareDetailKey = "ContextDrop.shareDetail"
     private static let openAIDetailKey = "ContextDrop.openAIDetail"
     private static let showTerminalKey = "ContextDrop.showTerminal"
+    private static let didFinishSetupKey = "ContextDrop.didFinishSetup"
+    private static let setupDeferredKey = "ContextDrop.setupDeferred"
+
+    /// The first-launch setup was completed (its last screen's Open Quick Chat).
+    static var didFinishSetup: Bool {
+        get { UserDefaults.standard.bool(forKey: didFinishSetupKey) }
+        set { UserDefaults.standard.set(newValue, forKey: didFinishSetupKey) }
+    }
+
+    /// Setup was put off with Set Up Later: it no longer opens at launch, and the menu bar offers to finish it.
+    static var setupDeferred: Bool {
+        get { UserDefaults.standard.bool(forKey: setupDeferredKey) }
+        set { UserDefaults.standard.set(newValue, forKey: setupDeferredKey) }
+    }
 
     /// The permission level new chats start with (Settings › Providers).
     static var permissionLevel: PermissionLevel {

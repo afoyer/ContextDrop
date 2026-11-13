@@ -65,6 +65,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         actions.openQuickChat = { [weak self] in self?.popover.performClose(nil); base.openQuickChat() }
         actions.openWindow = { [weak self] in self?.popover.performClose(nil); base.openWindow() }
         actions.openSettings = { [weak self] in self?.popover.performClose(nil); base.openSettings() }
+        actions.finishSetup = { [weak self] in self?.popover.performClose(nil); base.finishSetup() }
         actions.openRoom = { [weak self] in self?.popover.performClose(nil); base.openRoom() }
         actions.dropCurrent = { [weak self] in self?.popover.performClose(nil); base.dropCurrent() }
         let controller = NSHostingController(rootView: MenuBarView(model: model, room: room, shortcut: shortcut, actions: actions))

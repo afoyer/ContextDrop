@@ -6,6 +6,7 @@ import SwiftUI
 struct SettingsView: View {
     let store: ChatStore
     let shortcuts: ShortcutSettings
+    var runSetup: () -> Void = {}
 
     static let windowTitle = "ContextDrop Settings"
     static let width: CGFloat = 520
@@ -19,7 +20,7 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            GeneralSettingsTab(store: store)
+            GeneralSettingsTab(store: store, runSetup: runSetup)
                 .tabItem { Label("General", systemImage: "gearshape") }
             ProviderSettingsTab(store: store)
                 .tabItem { Label("Providers", systemImage: "cpu") }
@@ -38,7 +39,10 @@ struct SettingsView: View {
 
 private struct GeneralSettingsTab: View {
     let store: ChatStore
+    let runSetup: () -> Void
     @State private var name = ""
+    @State private var openAtLogin = LoginItem.isEnabled
+    @State private var loginMessage: String?
     @AppStorage(AppDefaults.preferredCLIKey) private var preferredCLI = AppDefaults.preferredCLI.rawValue
     @AppStorage(AppDefaults.routeCLIByTaskKey) private var routeCLIByTask = false
     @AppStorage(AppDefaults.cliWorkPreferencesKey) private var cliWorkPreferences = ""
@@ -50,6 +54,20 @@ private struct GeneralSettingsTab: View {
                     .onSubmit { store.peers.updateDisplayName(name); syncName() }
                 Text("Appears as \(store.peers.localDisplayName) · \(store.peers.localDevice)")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("App") {
+                Toggle("Open ContextDrop at login", isOn: $openAtLogin)
+                    .onChange(of: openAtLogin) {
+                        loginMessage = LoginItem.set(openAtLogin)
+                        openAtLogin = LoginItem.isEnabled
+                    }
+                if let loginMessage { Text(loginMessage).font(.caption).foregroundStyle(.secondary) }
+                HStack {
+                    Text("Install coding CLIs, pick shortcuts and see how the app works.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Run Setup Again…", action: runSetup)
+                }
             }
             Section("Auto mode") {
                 // Bound straight to the store, so it can't go stale while the window is reused.

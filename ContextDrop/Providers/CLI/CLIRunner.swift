@@ -136,6 +136,11 @@ enum CLIRunner {
         await pathCache.get()
     }
 
+    /// Forgets the cached login PATH, so a CLI installed into a new folder is found without restarting the app.
+    static func resetLoginPATH() async {
+        await pathCache.reset()
+    }
+
     static func executable(named name: String) async -> String? {
         let path = await loginPATH()
         for dir in path.split(separator: ":") {
@@ -292,7 +297,7 @@ enum CLIRunner {
 
     /// Xcode and app hosts inject dynamic-loader and process-control variables that
     /// must not follow the GUI process into an unrelated CLI (or its tool children).
-    private static func cliEnvironment() -> [String: String] {
+    static func cliEnvironment() -> [String: String] {
         ProcessInfo.processInfo.environment.filter { key, _ in
             !key.hasPrefix("DYLD_") && !key.hasPrefix("__XPC_") && !key.hasPrefix("__XCODE_")
                 && !["XPC_FLAGS", "XPC_SERVICE_NAME", "__CFBundleIdentifier", "LLVM_PROFILE_FILE"].contains(key)
@@ -407,6 +412,8 @@ private final class LineStream: @unchecked Sendable {
 private actor PathCache {
     var path: String?
     private var lookup: Task<String?, Never>?
+
+    func reset() { path = nil }
 
     func get() async -> String {
         if let path { return path }
