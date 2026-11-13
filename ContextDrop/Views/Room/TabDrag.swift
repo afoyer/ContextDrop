@@ -17,9 +17,14 @@ enum TabDrag {
     /// The tab being dragged, so a drop target can name it while it hovers (the payload itself is only read
     /// on drop). Never trusted on its own for a drop unless the payload is missing.
     static var current: UUID?
+    /// Called once per drag, when the pointer leaves the window the tab was dragged from.
+    static var onLeaveSourceWindow: (@MainActor () -> Void)?
+    private static var watch: Timer?
+    private static var leftSource = false
 
     static func provider(for id: UUID) -> NSItemProvider {
         current = id
+        watchDrag()
         let data = Data(id.uuidString.utf8)
         let provider = NSItemProvider()
         provider.registerDataRepresentation(forTypeIdentifier: UTType.contextDropTab.identifier, visibility: .all) { completion in
@@ -27,6 +32,29 @@ enum TabDrag {
             return nil
         }
         return provider
+    }
+
+    /// SwiftUI gives no callbacks during a drag, so follow the pointer until the button comes up.
+    private static func watchDrag() {
+        watch?.invalidate()
+        leftSource = false
+        let mouse = NSEvent.mouseLocation
+        let number = NSWindow.windowNumber(at: mouse, belowWindowWithWindowNumber: 0)
+        guard let frame = NSApp.window(withWindowNumber: number)?.frame else { return }
+        let timer = Timer(timeInterval: 0.05, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                if NSEvent.pressedMouseButtons & 1 == 0 {
+                    watch?.invalidate()
+                    watch = nil
+                } else if !leftSource, !frame.contains(NSEvent.mouseLocation) {
+                    leftSource = true
+                    onLeaveSourceWindow?()
+                }
+            }
+        }
+        // Common modes include event tracking, which is what runs during a drag.
+        RunLoop.main.add(timer, forMode: .common)
+        watch = timer
     }
 
     nonisolated static func id(from data: Data?) -> UUID? {

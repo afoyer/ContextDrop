@@ -228,6 +228,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             model.handleDrop(urls, action: .attach, in: model.panelConversationID)
             self.quickChat.show()
         }
+        // R5 board 6 B: a tab dragged out of its window brings the room up to drop it on.
+        TabDrag.onLeaveSourceWindow = { [weak self] in
+            guard let self, self.roomStore.isActive else { return }
+            self.roomWindow.bringForwardForDrop()
+        }
         // R5 board 6 B: a tab dropped on the icon goes in the room, as the room chip would put it there.
         menuBar.onDropTab = { [weak self] id in
             guard let self, let conversation = self.store.conversation(id) else { return }
