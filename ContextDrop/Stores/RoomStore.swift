@@ -35,6 +35,14 @@ final class RoomStore {
     @ObservationIgnored var viewCenter = CGPoint(x: 480, y: 320)
     /// What this Mac is typing into each chat tile. Never sent; shared by the canvas tile and its popped-out tab.
     var chatDrafts: [UUID: String] = [:]
+    /// What this Mac is writing as a follow-up to each run tile, with the files going along. Never sent until
+    /// it is; kept here so it survives the tile scrolling out of view.
+    var runDrafts: [UUID: RunDraft] = [:]
+    struct RunDraft: Equatable {
+        var text = ""
+        var files: [URL] = []
+        var isEmpty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && files.isEmpty }
+    }
     /// A local draft rescued when its chat tile disappears while someone is typing or sending.
     var recoveredChatDraft: String?
     private(set) var sendingChatTiles: Set<UUID> = []
@@ -1063,6 +1071,7 @@ final class RoomStore {
                 notice = "The chat was removed. Your unsent text is saved."
             }
             chatDrafts[id] = nil
+            runDrafts[id] = nil
         case .runNote(let id, let note):
             guard let run = tile(id)?.run, run.ownerID == localID, note.fromID != localID else { return }
             notice = "\(note.from) about “\(run.title)”: \(note.text)"

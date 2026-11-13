@@ -271,7 +271,8 @@ struct RoomCanvas: View {
                              onTyping: { if $0 { typing.insert(tile.id) } else { typing.remove(tile.id) } })
         case .run(let run):
             RoomRunTileView(store: store, tile: tile, run: run, onWatch: { onWatch(tile.id) },
-                            onOpenOwnRun: onOpenOwnRun.map { open in { open(tile.id) } })
+                            onOpenOwnRun: onOpenOwnRun.map { open in { open(tile.id) } },
+                            onTyping: { if $0 { typing.insert(tile.id) } else { typing.remove(tile.id) } })
         }
     }
 
