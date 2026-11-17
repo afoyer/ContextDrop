@@ -31,6 +31,8 @@ struct PanelActions {
     var pickImages: () -> Void = {}
     var addFolderShortcut: () -> Void = {}
     var openRoom: () -> Void = {}
+    /// Creates a room if needed, then puts a Quick Chat tab in it.
+    var putTabInRoom: (UUID) -> Void = { _ in }
     /// "To room": puts an answer on the table of the room you're in.
     var sendToRoom: (Message, Conversation) -> Void = { _, _ in }
     /// "To room" on an OpenAI tab: the chat becomes a chat tile. (A run tab has the room chip instead.)

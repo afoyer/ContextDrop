@@ -66,7 +66,7 @@ The stores hold state and talk to the network and to processes. The rules they f
 | What a chain of `/commands` asks for | `Models/SlashRequest.swift` | `PanelModel+Slash.swift` |
 | How a room message looks as JSON | `RoomWire` in `Models/Room.swift` | `RoomCodec` |
 
-- **Quick Chat** (`Windows/Panels.swift`, `Views/QuickChat`): the floating panel behind the global shortcut.
+- **Quick Chat** (`Windows/Panels.swift`, `Views/QuickChat`): the floating panel behind the global shortcut. Drag its top grip to move it; it keeps that position when reopened during the same session. Its room button floats to the left: click to create a room or add the current tab, or drop a chat tab on it to create a room and add that tab. Open tabs and recent chats in Quick Chat can be dragged there.
 - **Workspace window** (`Windows/WorkspaceWindow.swift`): one chat per tab. Quick Chat shows the same tabs. ⌘T new, ⌘1–9 jump (window), ⌃Tab next that needs you, ⌘W close, ⌘⇧T reopen, ⌥⌘A activity, two-finger swipe sideways.
 - **Panel** (`Stores/PanelModel.swift` and its `PanelModel+Attachments`, `+Slash`, `+Share` files): what Quick Chat shows and its keyboard logic. What it needs from the rest of the app is one `PanelActions` struct, filled in by `AppDelegate`.
 - **Providers** (`Providers/ChatProvider.swift`): every provider answers through one protocol and streams `ProviderEvent`s back; `ChatStore` knows nothing else about it. `ProviderKind` describes each one to the UI (see [Extending](#extending)).

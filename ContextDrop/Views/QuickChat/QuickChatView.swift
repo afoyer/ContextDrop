@@ -12,35 +12,49 @@ struct QuickChatView: View {
     }
 
     var body: some View {
-        content
+        HStack(alignment: .top, spacing: 10) {
+            QuickChatRoomTarget(model: model)
+            VStack(spacing: 0) {
+                PanelDragHandle()
+                    .frame(height: 20)
+                    .overlay {
+                        Capsule()
+                            .fill(Color.secondary.opacity(0.45))
+                            .frame(width: 38, height: 4)
+                            .allowsHitTesting(false)
+                    }
+                    .accessibilityLabel("Drag Quick Chat to move it")
+                content
+                    .fileDropTargets(model: model, conversationID: { [model] in model.panelConversationID }, enabled: acceptsDrops)
+            }
             .frame(width: model.width)
-            .fileDropTargets(model: model, conversationID: { [model] in model.panelConversationID }, enabled: acceptsDrops)
             .background(MaterialBackground(material: .hudWindow))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
             }
-            .animation(Motion.shareMode(model.reduceMotion), value: model.isWide)
-            .animation(Motion.shareMode(model.reduceMotion), value: model.terminalVisible)
-            .background {
-                // Panel-wide shortcuts that must work regardless of which control has focus.
-                Group {
-                    Button("Settings") { model.actions.openSettings() }.keyboardShortcut(",", modifiers: .command)
-                    Button("New chat") { model.newChat() }.keyboardShortcut("n", modifiers: .command)
-                    Button("New tab") { model.newChat() }.keyboardShortcut("t", modifiers: .command)
-                    Button("Close tab") { if let id = model.panelConversationID { model.closePanelTab(id) } else { model.escape() } }
-                        .keyboardShortcut("w", modifiers: .command)
-                    Button("Next tab") { model.stepPanelTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift])
-                    Button("Previous tab") { model.stepPanelTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
-                    Button("Activity") { if model.activeConversationID.flatMap({ model.store.conversation($0) })?.provider.capabilities.requiresFolder == true { model.toggleTerminal() } }
-                        .keyboardShortcut("a", modifiers: [.command, .option])
-                    Button("Open a room") { model.actions.openRoom() }
-                        .keyboardShortcut("r", modifiers: [.command, .option])
-                }
-                .opacity(0)
-                .allowsHitTesting(false)
+        }
+        .animation(Motion.shareMode(model.reduceMotion), value: model.isWide)
+        .animation(Motion.shareMode(model.reduceMotion), value: model.terminalVisible)
+        .background {
+            // Panel-wide shortcuts that must work regardless of which control has focus.
+            Group {
+                Button("Settings") { model.actions.openSettings() }.keyboardShortcut(",", modifiers: .command)
+                Button("New chat") { model.newChat() }.keyboardShortcut("n", modifiers: .command)
+                Button("New tab") { model.newChat() }.keyboardShortcut("t", modifiers: .command)
+                Button("Close tab") { if let id = model.panelConversationID { model.closePanelTab(id) } else { model.escape() } }
+                    .keyboardShortcut("w", modifiers: .command)
+                Button("Next tab") { model.stepPanelTab(1) }.keyboardShortcut("]", modifiers: [.command, .shift])
+                Button("Previous tab") { model.stepPanelTab(-1) }.keyboardShortcut("[", modifiers: [.command, .shift])
+                Button("Activity") { if model.activeConversationID.flatMap({ model.store.conversation($0) })?.provider.capabilities.requiresFolder == true { model.toggleTerminal() } }
+                    .keyboardShortcut("a", modifiers: [.command, .option])
+                Button("Open a room") { model.actions.openRoom() }
+                    .keyboardShortcut("r", modifiers: [.command, .option])
             }
+            .opacity(0)
+            .allowsHitTesting(false)
+        }
     }
 
     @ViewBuilder
@@ -102,6 +116,61 @@ struct QuickChatView: View {
             } else {
                 HomeView(model: model)
             }
+        }
+    }
+}
+
+/// A separate, floating target beside Quick Chat. A click creates a room or adds the current tab;
+/// a tab drop adds the dragged tab, creating a room first if needed.
+private struct QuickChatRoomTarget: View {
+    let model: PanelModel
+    @State private var dropTargeted = false
+
+    private var currentChat: Conversation? {
+        model.panelConversationID.flatMap(model.store.conversation)
+    }
+
+    private var label: String {
+        if !model.roomActive { return "Create\nroom" }
+        return currentChat == nil ? "Open\nroom" : "Add to\nroom"
+    }
+
+    private var help: String {
+        if !model.roomActive { return "Create a room. Drop a chat tab here to create a room and add it." }
+        return currentChat == nil ? "Open the room. Drop a chat tab here to add it." : "Add this tab to the room, or drop another tab here."
+    }
+
+    var body: some View {
+        Button {
+            if !model.roomActive { model.actions.openRoom() }
+            else if let currentChat { model.actions.putTabInRoom(currentChat.id) }
+            else { model.actions.openRoom() }
+        } label: {
+            VStack(spacing: 7) {
+                Image(systemName: dropTargeted ? "arrow.down.to.line" : "square.grid.2x2")
+                    .font(.system(size: 19, weight: .medium))
+                Text(dropTargeted ? "Add to\nroom" : label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            .foregroundStyle(Color.accentColor)
+            .frame(width: 76, height: 78)
+            .background(MaterialBackground(material: .hudWindow))
+            .background(Color.accentColor.opacity(dropTargeted ? 0.16 : 0), in: RoundedRectangle(cornerRadius: 14))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.accentColor.opacity(dropTargeted ? 0.9 : 0.35),
+                                  style: StrokeStyle(lineWidth: dropTargeted ? 2 : 1, dash: dropTargeted ? [5, 4] : []))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(label.replacingOccurrences(of: "\n", with: " "))
+        .onDrop(of: [.contextDropTab], isTargeted: $dropTargeted) { providers in
+            TabDrag.load(providers) { model.actions.putTabInRoom($0) }
         }
     }
 }
@@ -180,6 +249,7 @@ struct HomeView: View {
                     VStack(spacing: 2) {
                         ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                             HomeRow(item: item, selected: index == model.selection, model: model)
+                                .modifier(HomeItemTabDrag(item: item))
                                 .onTapGesture { model.selection = index; model.open(item) }
                                 .onHover { if $0 { model.selection = index } }
                         }
@@ -309,6 +379,18 @@ struct HomeView: View {
     }
 }
 
+private struct HomeItemTabDrag: ViewModifier {
+    let item: HomeItem
+
+    func body(content: Content) -> some View {
+        if case .chat(let conversation) = item {
+            content.modifier(TabDragSource(conversation: conversation, enabled: true))
+        } else {
+            content
+        }
+    }
+}
+
 /// Open conversations stay visible while the home composer is ready for a new question.
 private struct HomeTabBubbles: View {
     let model: PanelModel
@@ -333,6 +415,7 @@ private struct HomeTabBubbles: View {
                         .buttonStyle(.plain)
                         .help("Open \(conversation.title.isEmpty ? "New chat" : conversation.title)")
                         .accessibilityLabel("Open tab: \(conversation.title.isEmpty ? "New chat" : conversation.title)")
+                        .modifier(TabDragSource(conversation: conversation, enabled: true))
                     }
                 }
             }

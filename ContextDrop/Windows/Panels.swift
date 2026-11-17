@@ -29,6 +29,8 @@ final class FloatingPanel: NSPanel {
     /// (the activity pane included: the expanded panel stays centered).
     var anchorTop: CGFloat = 0
     var anchorMidX: CGFloat = 0
+    /// Keeps a user-chosen location when Quick Chat is hidden and shown again.
+    private var hasUserPosition = false
     /// Tells the content how tall it may get on this screen.
     var onAvailableHeight: ((CGFloat) -> Void)?
     /// Off while the show animation moves the panel itself.
@@ -45,7 +47,7 @@ final class FloatingPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         hidesOnDeactivate = false
         becomesKeyOnlyIfNeeded = false
-        isMovableByWindowBackground = true
+        isMovableByWindowBackground = false
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true
@@ -60,7 +62,16 @@ final class FloatingPanel: NSPanel {
         guard anchoringEnabled, !placing, anchorTop > 0, isVisible else { return }
         anchorTop = frame.maxY
         anchorMidX = frame.midX
+        hasUserPosition = true
         if let visible = (screen ?? NSScreen.main)?.visibleFrame { onAvailableHeight?(max(240, anchorTop - visible.minY - 16)) }
+    }
+
+    /// The strip above Quick Chat starts a native window drag, then makes the new position its resize anchor.
+    func drag(with event: NSEvent) {
+        anchoringEnabled = false
+        performDrag(with: event)
+        anchoringEnabled = true
+        userMoved()
     }
 
     override var canBecomeKey: Bool { true }
@@ -95,8 +106,14 @@ final class FloatingPanel: NSPanel {
         invalidateShadow()
     }
 
-    /// Place the panel like Spotlight on the screen under the mouse.
+    /// Reuse a dragged location, or place the panel like Spotlight on the screen under the mouse.
     func positionOnActiveScreen() {
+        let savedAnchor = NSPoint(x: anchorMidX, y: anchorTop - 1)
+        if hasUserPosition, let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(savedAnchor) }) {
+            onAvailableHeight?(max(240, anchorTop - screen.visibleFrame.minY - 16))
+            setFrame(frame, display: false)
+            return
+        }
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
         guard let visible = screen?.visibleFrame else { return }
@@ -105,6 +122,24 @@ final class FloatingPanel: NSPanel {
         anchorMidX = visible.midX
         onAvailableHeight?(anchorTop - visible.minY - 16)
         setFrame(frame, display: false)
+    }
+}
+
+/// Native mouse handling for Quick Chat's drag strip, separate from tabs and file drop targets.
+struct PanelDragHandle: NSViewRepresentable {
+    func makeNSView(context: Context) -> PanelDragHandleView { PanelDragHandleView() }
+    func updateNSView(_ view: PanelDragHandleView, context: Context) {}
+}
+
+final class PanelDragHandleView: NSView {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        (window as? FloatingPanel)?.drag(with: event)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
     }
 }
 

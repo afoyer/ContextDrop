@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         panelModel.actions.addFolderShortcut = { [weak self] in self?.addFolderShortcut() }
         panelModel.actions.show = { [weak self] in self?.quickChat.show() }
         panelModel.actions.openRoom = { [weak self] in self?.openRoom() }
+        panelModel.actions.putTabInRoom = { [weak self] id in self?.putTabInRoom(id) }
         panelModel.actions.sendToRoom = { [weak self] message, conversation in self?.sendToRoom(message, from: conversation) }
         panelModel.actions.sendTabToRoom = { [weak self] conversation in self?.sendTabToRoom(conversation) }
         panelModel.actions.shareRun = { [weak self] conversation, level in self?.shareRun(conversation, level: level) }
@@ -286,6 +287,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         refreshPanelRoom()
         roomWindow.show()
+    }
+
+    /// The Quick Chat room target works before a room exists as well as while one is active.
+    private func putTabInRoom(_ id: UUID) {
+        guard let conversation = store.conversation(id), conversation.provider.roomShare != .none else { return }
+        if !roomStore.isActive { openRoom() }
+        switch conversation.provider.roomShare {
+        case .chatCopy: sendTabToRoom(conversation)
+        case .liveRun: shareRun(conversation, level: panelModel.lastShareLevel)
+        case .none: break
+        }
     }
 
     private func refreshPanelRoom() {

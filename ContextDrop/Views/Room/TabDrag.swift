@@ -74,7 +74,7 @@ enum TabDrag {
     }
 }
 
-/// Makes a tab draggable into the room while you're in one. Out of a room the tab behaves as before.
+/// Makes a tab draggable to the room canvas or Quick Chat's room target.
 struct TabDragSource: ViewModifier {
     let conversation: Conversation
     let enabled: Bool

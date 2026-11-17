@@ -427,8 +427,8 @@ struct TabStrip: View {
             }
         }
         .onHover { inside in if inside { hovered = id } else if hovered == id { hovered = nil } }
-        // R5 board 6 B: in a room, drag the tab onto the room's canvas (or the menu bar icon) to put it there.
-        .modifier(TabDragSource(conversation: conversation, enabled: model.roomActive))
+        // Quick Chat tabs can also be dragged to its room target before a room exists.
+        .modifier(TabDragSource(conversation: conversation, enabled: model.roomActive || compact))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityLabel("\(conversation.title), \(caption(conversation))")
