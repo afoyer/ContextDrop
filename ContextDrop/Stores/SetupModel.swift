@@ -27,7 +27,7 @@ final class SetupModel {
     }
 
     /// What setup is doing for one coding CLI.
-    enum Task: Equatable {
+    enum CLIState: Equatable {
         case idle
         case installing
         case signingIn
@@ -42,7 +42,7 @@ final class SetupModel {
     let shortcuts: ShortcutSettings
 
     var step: Step = .welcome
-    private(set) var tasks: [ProviderKind: Task] = [:]
+    private(set) var cliStates: [ProviderKind: CLIState] = [:]
     /// Cards showing the Terminal commands.
     var showingCommands: Set<ProviderKind> = []
     var apiKey = ""
@@ -74,8 +74,8 @@ final class SetupModel {
         keyMessage = nil
         openAtLogin = LoginItem.isEnabled || !AppDefaults.didFinishSetup
         showingCommands = []
-        tasks = tasks.filter { $0.value == .installing || $0.value == .signingIn }
-        Swift.Task { await CLIRunner.resetLoginPATH(); store.refreshProviderStatus() }
+        cliStates = cliStates.filter { $0.value == .installing || $0.value == .signingIn }
+        Task { await CLIRunner.resetLoginPATH(); store.refreshProviderStatus() }
     }
 
     // MARK: Navigation
@@ -112,16 +112,16 @@ final class SetupModel {
 
     // MARK: Coding CLIs
 
-    func task(_ kind: ProviderKind) -> Task { tasks[kind] ?? .idle }
+    func cliState(_ kind: ProviderKind) -> CLIState { cliStates[kind] ?? .idle }
 
-    var isBusy: Bool { tasks.values.contains { $0 == .installing || $0 == .signingIn } }
+    var isBusy: Bool { cliStates.values.contains { $0 == .installing || $0 == .signingIn } }
 
     func install(_ kind: ProviderKind) {
         guard let agent = CLISetup.agent(for: kind), !isBusy(kind) else { return }
         let job = SetupJob()
         jobs[kind] = job
-        tasks[kind] = .installing
-        Swift.Task {
+        cliStates[kind] = .installing
+        Task {
             let outcome = await CLISetup.install(agent, job: job)
             finished(kind, outcome, action: .install)
             // Installed and found: go straight on to signing in, as the card promised.
@@ -136,8 +136,8 @@ final class SetupModel {
         guard let agent = CLISetup.agent(for: kind), !isBusy(kind) else { return }
         let job = SetupJob()
         jobs[kind] = job
-        tasks[kind] = .signingIn
-        Swift.Task {
+        cliStates[kind] = .signingIn
+        Task {
             let outcome = await CLISetup.signIn(agent, job: job)
             finished(kind, outcome, action: .signIn)
             store.refreshProviderStatus()
@@ -149,7 +149,7 @@ final class SetupModel {
     }
 
     func retry(_ kind: ProviderKind, _ action: Action) {
-        tasks[kind] = .idle
+        cliStates[kind] = .idle
         switch action {
         case .install: install(kind)
         case .signIn: signIn(kind)
@@ -161,34 +161,34 @@ final class SetupModel {
     }
 
     func checkAgain() {
-        Swift.Task {
+        Task {
             await CLIRunner.resetLoginPATH()
             store.refreshProviderStatus()
         }
     }
 
     private func isBusy(_ kind: ProviderKind) -> Bool {
-        task(kind) == .installing || task(kind) == .signingIn
+        cliState(kind) == .installing || cliState(kind) == .signingIn
     }
 
     private func finished(_ kind: ProviderKind, _ outcome: CLISetup.Outcome, action: Action) {
         jobs[kind] = nil
         switch outcome {
-        case .done, .cancelled: tasks[kind] = .idle
+        case .done, .cancelled: cliStates[kind] = .idle
         case .failed(let message):
-            tasks[kind] = .failed(message, retry: action)
+            cliStates[kind] = .failed(message, retry: action)
             showingCommands.insert(kind)
         case .unavailable:
-            tasks[kind] = .unavailable
+            cliStates[kind] = .unavailable
             showingCommands.insert(kind)
         }
     }
 
     /// While the window is open, picks up a CLI installed or signed in from Terminal.
     func watchProviders() async {
-        while !Swift.Task.isCancelled {
-            try? await Swift.Task.sleep(for: .seconds(3))
-            guard !Swift.Task.isCancelled else { return }
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
             let watching = step == .providers || step == .ready
             let missing = ProviderKind.deep.contains { !store.status($0).isReady }
             if watching, missing, !isBusy { store.refreshProviderStatus() }

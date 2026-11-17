@@ -255,7 +255,7 @@ private struct SetupCLICard: View {
     private enum Phase { case checking, notInstalled, notSignedIn, ready, installing, signingIn, failed(String, SetupModel.Action), unavailable }
 
     private var phase: Phase {
-        switch model.task(kind) {
+        switch model.cliState(kind) {
         case .installing: return .installing
         case .signingIn: return .signingIn
         case .failed(let message, let action): return .failed(message, action)
