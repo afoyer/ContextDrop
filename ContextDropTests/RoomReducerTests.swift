@@ -7,17 +7,17 @@ final class RoomReducerTests: XCTestCase {
     private var later: Date { t0.addingTimeInterval(10) }
 
     private func card(by name: String, text: String = "note") -> RoomTile {
-        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name, movedAt: t0, updatedAt: t0,
+        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name,
                  content: .card(RoomCardBody(kind: .thought, text: text, caption: nil)))
     }
 
     private func chat(ownedBy name: String, title: String = RoomReducer.untitledChat) -> RoomTile {
-        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name, movedAt: t0, updatedAt: t0,
+        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name,
                  content: .chat(RoomChatTile(title: title, ownerName: name, model: "gpt-4.1")))
     }
 
     private func run(ownedBy name: String) -> RoomTile {
-        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name, movedAt: t0, updatedAt: t0,
+        RoomTile(id: UUID(), x: 0, y: 0, addedBy: name,
                  content: .run(RoomRunTile(ownerName: name, title: "Run", folder: "~/p")))
     }
 
@@ -32,6 +32,23 @@ final class RoomReducerTests: XCTestCase {
     }
 
     // MARK: Tiles
+
+    func testTextAndCollapseHaveIndependentTimestamps() {
+        let tile = card(by: "Alice")
+        var state = room(tile)
+        XCTAssertNotNil(RoomReducer.apply(.setCollapsed(tile.id, true), to: &state, sender: "Bob"))
+        XCTAssertNotNil(RoomReducer.apply(.editTile(tile.id, text: "edited"),
+                                         to: &state, sender: "Alice"))
+        XCTAssertEqual(state.tiles[0].card?.text, "edited")
+        XCTAssertTrue(state.tiles[0].collapsed)
+
+        var reversed = room(tile)
+        XCTAssertNotNil(RoomReducer.apply(.editTile(tile.id, text: "edited"), to: &reversed, sender: "Alice"))
+        XCTAssertNotNil(RoomReducer.apply(.setCollapsed(tile.id, true),
+                                         to: &reversed, sender: "Bob"))
+        XCTAssertEqual(reversed.tiles[0].card?.text, "edited")
+        XCTAssertTrue(reversed.tiles[0].collapsed)
+    }
 
     func testMembershipMessagesAreNotChangesToTheTable() {
         var state = room()
@@ -62,22 +79,21 @@ final class RoomReducerTests: XCTestCase {
         XCTAssertEqual(state.tiles.first?.addedBy, "Carol")
     }
 
-    func testTheLaterMoveWins() {
+    func testTheHostAppliesMovesInArrivalOrder() {
         let tile = card(by: "Bob")
         var state = room(tile)
-        XCTAssertNotNil(RoomReducer.apply(.moveTile(tile.id, x: 5, y: 6, stamp: later), to: &state, sender: "Carol"), "anyone may move a tile")
-        XCTAssertNil(RoomReducer.apply(.moveTile(tile.id, x: 9, y: 9, stamp: t0.addingTimeInterval(1)), to: &state, sender: "Bob"), "an older move is stale")
-        XCTAssertEqual(state.tiles[0].x, 5)
-        XCTAssertEqual(state.tiles[0].movedAt, later)
+        XCTAssertNotNil(RoomReducer.apply(.moveTile(tile.id, x: 5, y: 6), to: &state, sender: "Carol"), "anyone may move a tile")
+        XCTAssertNotNil(RoomReducer.apply(.moveTile(tile.id, x: 9, y: 9), to: &state, sender: "Bob"))
+        XCTAssertEqual(state.tiles[0].x, 9)
     }
 
     func testOnlyTheAuthorEditsACard() {
         let tile = card(by: "Bob")
         var state = room(tile)
-        XCTAssertNil(RoomReducer.apply(.editTile(tile.id, text: "mine now", stamp: later), to: &state, sender: "Carol"))
-        XCTAssertNil(RoomReducer.apply(.editTile(tile.id, text: "host", stamp: later), to: &state, sender: "Alice"), "not even the host")
-        XCTAssertNil(RoomReducer.apply(.editTile(tile.id, text: "old", stamp: t0), to: &state, sender: "Bob"), "not newer than what is there")
-        XCTAssertNotNil(RoomReducer.apply(.editTile(tile.id, text: "new", stamp: later), to: &state, sender: "Bob"))
+        XCTAssertNil(RoomReducer.apply(.editTile(tile.id, text: "mine now"), to: &state, sender: "Carol"))
+        XCTAssertNil(RoomReducer.apply(.editTile(tile.id, text: "host"), to: &state, sender: "Alice"), "not even the host")
+        XCTAssertNotNil(RoomReducer.apply(.editTile(tile.id, text: "old"), to: &state, sender: "Bob"))
+        XCTAssertNotNil(RoomReducer.apply(.editTile(tile.id, text: "new"), to: &state, sender: "Bob"))
         XCTAssertEqual(state.tiles[0].card?.text, "new")
     }
 
@@ -89,7 +105,7 @@ final class RoomReducerTests: XCTestCase {
         XCTAssertNotNil(RoomReducer.apply(.removeTile(carols.id), to: &state, sender: "Alice"), "the host may remove any tile")
         XCTAssertTrue(state.tiles.isEmpty)
 
-        XCTAssertNil(RoomReducer.apply(.moveTile(bobs.id, x: 1, y: 1, stamp: later), to: &state, sender: "Bob"), "a late change to a removed tile")
+        XCTAssertNil(RoomReducer.apply(.moveTile(bobs.id, x: 1, y: 1), to: &state, sender: "Bob"), "a late change to a removed tile")
         XCTAssertNil(RoomReducer.apply(.removeTile(bobs.id), to: &state, sender: nil))
     }
 
@@ -221,7 +237,11 @@ final class RoomReducerTests: XCTestCase {
         let work = run(ownedBy: "Carol")
         var state = room(work)
         let mine = RunRequest(id: UUID(), from: "Carol", text: "add tests", files: [file(by: "Carol")], status: .accepted)
-        XCTAssertEqual(RoomReducer.apply(.runRequest(work.id, mine), to: &state, sender: "Carol"), .runRequest(work.id, mine))
+        guard case .runRequest(_, let accepted)? = RoomReducer.apply(.runRequest(work.id, mine), to: &state, sender: "Carol") else {
+            return XCTFail("Owner follow-up was refused")
+        }
+        XCTAssertEqual(accepted.fromID, "Carol")
+        XCTAssertEqual(accepted.status, .accepted)
         XCTAssertEqual(state.tiles[0].run?.pendingRequests, [])
         XCTAssertNil(RoomReducer.apply(.runRequest(work.id, RunRequest(id: UUID(), from: "Carol", text: "x", status: .dismissed)),
                                        to: &state, sender: "Carol"), "nothing to send that is already dismissed")
@@ -382,15 +402,15 @@ final class RoomReducerTests: XCTestCase {
         var streaming = chat(ownedBy: "Bob")
         var reply = message(.assistant, by: "OpenAI")
         reply.streaming = true
-        streaming.content = .chat(RoomChatTile(title: "t", ownerName: "Bob", model: "gpt-4.1", messages: [reply]))
+        streaming.content = .chat(RoomChatTile(title: "t", ownerName: "Bob", ownerID: "bob-id", model: "gpt-4.1", messages: [reply]))
         var bobs = run(ownedBy: "Bob")
         var carols = run(ownedBy: "Carol")
-        bobs.content = .run(RoomRunTile(ownerName: "Bob", title: "Run", folder: "~/p",
+        bobs.content = .run(RoomRunTile(ownerName: "Bob", ownerID: "bob-id", title: "Run", folder: "~/p",
                                         requests: [RunRequest(id: UUID(), from: "Carol", text: "go on")]))
-        carols.content = .run(RoomRunTile(ownerName: "Carol", title: "Run", folder: "~/p",
+        carols.content = .run(RoomRunTile(ownerName: "Carol", ownerID: "carol-id", title: "Run", folder: "~/p",
                                           requests: [RunRequest(id: UUID(), from: "Bob", text: "mine")]))
         var state = room(streaming, bobs, carols)
-        state.memberGone("Bob")
+        state.memberGone("bob-id")
         XCTAssertEqual(state.tiles[0].chat?.isStreaming, false)
         XCTAssertEqual(state.tiles[1].run?.state, .waiting("Bob left the room, so this run is no longer reporting."))
         XCTAssertEqual(state.tiles[1].run?.requests.map(\.status), [.dismissed], "nobody is left to run what waited on Bob")

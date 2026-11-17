@@ -2,6 +2,38 @@ import Foundation
 @preconcurrency import MultipeerConnectivity
 import Observation
 
+/// Narrow transport seam used by the room coordinator and the in-memory room tests.
+@MainActor
+protocol RoomTransport: AnyObject {
+    var pendingInvitations: [RoomInvitation] { get }
+    var invitedPeers: [MCPeerID] { get }
+    var onInvitation: (@MainActor (RoomInvitation) -> Void)? { get set }
+    var onInvitationsChanged: (@MainActor () -> Void)? { get set }
+    var onMessage: (@MainActor (RoomMessage, MCPeerID) -> Void)? { get set }
+    var onPeerConnected: (@MainActor (MCPeerID) -> Void)? { get set }
+    var onPeerDisconnected: (@MainActor (MCPeerID) -> Void)? { get set }
+    var onInviteUnanswered: (@MainActor (MCPeerID) -> Void)? { get set }
+    var onJoinFailed: (@MainActor () -> Void)? { get set }
+    var onFile: (@MainActor (URL, String) -> Void)? { get set }
+    var onFailure: (@MainActor (String) -> Void)? { get set }
+    func bindMember(_ id: String, to peerID: MCPeerID)
+    func isHostPeer(_ peerID: MCPeerID) -> Bool
+    func host()
+    func invite(_ peerID: MCPeerID, invitation: RoomInvitation) -> Bool
+    func accept(_ invitation: RoomInvitation) -> Bool
+    func decline(_ invitation: RoomInvitation)
+    @discardableResult func send(_ message: RoomMessage, to: [MCPeerID]?, except: MCPeerID?) -> Bool
+    func sendFile(_ url: URL, name: String, toMember: String, done: @escaping @MainActor @Sendable (Bool) -> Void)
+    func close(afterFlush: Bool)
+}
+
+extension RoomTransport {
+    @discardableResult func send(_ message: RoomMessage) -> Bool { send(message, to: nil, except: nil) }
+    @discardableResult func send(_ message: RoomMessage, to: [MCPeerID]) -> Bool { send(message, to: to, except: nil) }
+    @discardableResult func send(_ message: RoomMessage, except: MCPeerID?) -> Bool { send(message, to: nil, except: except) }
+    func close() { close(afterFlush: false) }
+}
+
 /// Transport for one room: a single long-lived MCSession, plus the room invitations that arrive for this Mac.
 ///
 /// Host: `host()` then `invite(_:invitation:)` (through PeerService's browser). Every joiner talks to the host,
@@ -10,7 +42,7 @@ import Observation
 /// MPC delegates run on private queues; each is `nonisolated` and only forwards to the main actor.
 @MainActor
 @Observable
-final class RoomService: NSObject {
+final class RoomService: NSObject, RoomTransport {
     nonisolated static let invitationTimeout: TimeInterval = 60
     nonisolated static let joinTimeout: TimeInterval = 30
     /// MCSession holds 8 peers including this one.
@@ -40,11 +72,13 @@ final class RoomService: NSObject {
     /// Guest only: accepted, but the host never connected.
     @ObservationIgnored var onJoinFailed: (@MainActor () -> Void)?
     /// A file arrived (already moved to a temporary place we own). The name is "<tileID>|<fileID>".
+    @ObservationIgnored var onFailure: (@MainActor (String) -> Void)?
     @ObservationIgnored var onFile: (@MainActor (URL, String) -> Void)?
 
     @ObservationIgnored private let peers: PeerService
     @ObservationIgnored private var session: MCSession?
     @ObservationIgnored private var role: Role?
+    @ObservationIgnored private var memberPeers: [String: MCPeerID] = [:]
     @ObservationIgnored private var replies: [UUID: PendingReply] = [:]
 
     init(peers: PeerService) {
@@ -55,6 +89,8 @@ final class RoomService: NSObject {
             self.handleInvitation(invitation, from: peerID, reply: reply)
         }
     }
+
+    func bindMember(_ id: String, to peerID: MCPeerID) { memberPeers[id] = peerID }
 
     func isHostPeer(_ peerID: MCPeerID) -> Bool {
         if case .guest(let host) = role { return host == peerID }
@@ -131,6 +167,11 @@ final class RoomService: NSObject {
     }
 
     private func handleInvitation(_ raw: RoomInvitation, from peerID: MCPeerID, reply: InvitationReply) {
+        guard raw.version == RoomMessage.currentVersion else {
+            reply.handler(false, nil)
+            onFailure?("This room uses an incompatible app version. Update both Macs before joining.")
+            return
+        }
         // The name shown is the peer's real display name, not whatever the context claims.
         var invitation = raw.sanitized()
         invitation.hostName = peerID.displayName
@@ -156,8 +197,9 @@ final class RoomService: NSObject {
     // MARK: Messages
 
     /// Host: to every connected peer (or `to`), minus `except`. Guest: to the host only.
-    func send(_ message: RoomMessage, to targets: [MCPeerID]? = nil, except: MCPeerID? = nil) {
-        guard let session, let role else { return }
+    @discardableResult
+    func send(_ message: RoomMessage, to targets: [MCPeerID]? = nil, except: MCPeerID? = nil) -> Bool {
+        guard let session, let role else { return false }
         var recipients: [MCPeerID]
         switch role {
         case .host: recipients = targets ?? connectedPeers
@@ -165,11 +207,14 @@ final class RoomService: NSObject {
         }
         let live = session.connectedPeers
         recipients = recipients.filter { $0 != except && live.contains($0) }
-        guard !recipients.isEmpty else { return }
+        guard !recipients.isEmpty else { if case .host = role { return true }; return false }
         do {
             try session.send(try RoomCodec.encode(message), toPeers: recipients, with: .reliable)
+            return true
         } catch {
             p2pLog.error("Room send (\(message.kind.rawValue, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)")
+            onFailure?("The room change could not be sent. Rejoin the room to synchronize.")
+            return false
         }
     }
 
@@ -179,7 +224,7 @@ final class RoomService: NSObject {
         guard let session, let role else { done(false); return }
         let target: MCPeerID?
         switch role {
-        case .host: target = connectedPeers.first { $0.displayName == member }
+        case .host: target = memberPeers[member]
         case .guest(let host): target = host
         }
         guard let target, session.connectedPeers.contains(target) else { done(false); return }
@@ -197,6 +242,7 @@ final class RoomService: NSObject {
 
     /// Leaves the session. `afterFlush` keeps the connection up briefly so a last message (ended / left) gets out.
     func close(afterFlush: Bool = false) {
+        memberPeers = [:]
         guard let session else { return }
         self.session = nil
         role = nil
@@ -251,6 +297,10 @@ final class RoomService: NSObject {
         do {
             onMessage?(try RoomCodec.decode(data), peerID)
         } catch {
+            if case RoomWireError.unsupportedVersion = error {
+                onFailure?("This Mac uses an incompatible room protocol. Update both apps before joining.")
+                if isHostPeer(peerID) { close(); onJoinFailed?() }
+            }
             p2pLog.error("Room: ignored invalid message from \(peerID.displayName, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }

@@ -7,6 +7,8 @@ enum RoomMetrics {
     static let runWidth: CGFloat = 400
     static let cardRadius: CGFloat = 12
     static let tileRadius: CGFloat = 14
+    /// Run tiles are terminal windows: tighter corners than a chat.
+    static let runRadius: CGFloat = 9
     static let gridStep: CGFloat = 22
     /// Height of an open chat tile's conversation. The tile scrolls inside itself.
     static let chatTranscriptHeight: CGFloat = 250
@@ -19,7 +21,13 @@ enum RoomMetrics {
         }
     }
 
-    static func radius(for tile: RoomTile) -> CGFloat { tile.card != nil ? cardRadius : tileRadius }
+    static func radius(for tile: RoomTile) -> CGFloat {
+        switch tile.content {
+        case .card: cardRadius
+        case .chat: tileRadius
+        case .run: runRadius
+        }
+    }
 
     /// Where a tile sits on the canvas. `measured` is its size once it has been laid out;
     /// without it (off screen since the window opened) the height is a guess.
@@ -31,7 +39,18 @@ enum RoomMetrics {
         switch tile.content {
         case .card: 130
         case .chat: tile.collapsed ? 110 : 460
-        case .run(let run): run.isLive ? 420 : 70
+        case .run(let run): run.isLive ? 420 : tile.collapsed ? 70 : 260
+        }
+    }
+
+    /// Tiles that scroll inside themselves, so scrolling over them doesn't pan the canvas:
+    /// an open chat (its conversation) and an open finished run (its summary).
+    static func scrollsInside(_ tile: RoomTile) -> Bool {
+        guard !tile.collapsed else { return false }
+        switch tile.content {
+        case .card: return false
+        case .chat: return true
+        case .run(let run): return !run.isLive
         }
     }
 }
@@ -57,6 +76,10 @@ enum RoomPalette {
     static let runLabel = dynamic(light: NSColor(red: 0.1, green: 0.5, blue: 0.3, alpha: 1), dark: NSColor(red: 0.37, green: 0.83, blue: 0.59, alpha: 1))
     static let waitingLabel = dynamic(light: NSColor(red: 0.72, green: 0.42, blue: 0.0, alpha: 1), dark: NSColor(red: 1.0, green: 0.7, blue: 0.25, alpha: 1))
     static let running = Color(nsColor: .systemGreen)
+    /// The dashed edge of the zone a dragged tab lands in (#5fd497).
+    static let dropZone = Color(red: 0.373, green: 0.831, blue: 0.592)
+    /// The button that starts something on your Mac ("Start run", "Put in room"): the green of "Acts".
+    static let go = Color(red: 0.19, green: 0.64, blue: 0.42)
     static let waiting = Color(nsColor: .systemOrange)
     static let removed = dynamic(light: NSColor(red: 0.8, green: 0.2, blue: 0.15, alpha: 1), dark: NSColor(red: 1.0, green: 0.42, blue: 0.37, alpha: 1))
 

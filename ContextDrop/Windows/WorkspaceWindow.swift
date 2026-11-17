@@ -60,7 +60,7 @@ final class WorkspaceWindowController: NSObject, NSWindowDelegate {
     func newTab() {
         let current = model.store.conversation(workspace.selected)
         let id = model.store.newConversation(provider: current?.provider)
-        if let folder = current?.folder, current?.provider.isDeep == true { model.store.setFolder(folder, for: id) }
+        if let folder = current?.folder, current?.provider.capabilities.requiresFolder == true { model.store.setFolder(folder, for: id) }
         workspace.open(id)
         model.session(id).requestFocus()
     }
@@ -123,7 +123,7 @@ final class WorkspaceWindowController: NSObject, NSWindowDelegate {
             return true
         }
         if flags == [.command, .option], key == "a" || event.keyCode == 0 {
-            if model.store.conversation(workspace.selected)?.provider.isDeep == true { model.toggleTerminal() }
+            if model.store.conversation(workspace.selected)?.provider.capabilities.requiresFolder == true { model.toggleTerminal() }
             return true
         }
         if flags == [.command, .shift] {
@@ -214,19 +214,21 @@ struct WorkspaceView: View {
                     Color.clear.frame(width: 0, height: 0)
                 }
                 Spacer(minLength: 8)
-                if conversation.provider.isDeep {
+                if conversation.provider.capabilities.requiresFolder {
                     FolderChip(model: model, conversation: conversation)
                     PermissionLevelMenu(store: store, conversation: conversation)
                 }
                 providerMenu(conversation)
                 faces
-                if conversation.provider.isDeep {
+                if conversation.provider.capabilities.requiresFolder {
                     Button { model.toggleTerminal() } label: { Image(systemName: model.showTerminal ? "sidebar.right" : "terminal") }
                         .buttonStyle(.borderless)
                         .help(model.showTerminal ? "Hide activity (⌥⌘A)" : "Show activity (⌥⌘A)")
                         .accessibilityLabel(model.showTerminal ? "Hide activity" : "Show activity")
                 }
-                if model.roomActive, conversation.provider.roomShare != .none, !conversation.messages.isEmpty {
+                if conversation.provider.roomShare == .liveRun {
+                    RoomShareChip(model: model, conversation: conversation)
+                } else if model.roomActive, conversation.provider.roomShare == .chatCopy, !conversation.messages.isEmpty {
                     Button { model.actions.sendTabToRoom(conversation) } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "square.grid.2x2")
@@ -234,9 +236,7 @@ struct WorkspaceView: View {
                         }
                     }
                     .controlSize(.small)
-                    .help(conversation.provider.roomShare == .liveRun
-                          ? "Put this run in the room. Others can watch and ask to continue it; you OK each follow-up."
-                          : "Put this chat in the room. Anyone there can reply; it answers from your Mac.")
+                    .help("Put this chat in the room. Anyone there can reply; it answers from your Mac.")
                 }
                 Button { share(conversation) } label: {
                     HStack(spacing: 4) {
@@ -318,7 +318,7 @@ struct WorkspaceView: View {
                 HStack(spacing: 0) {
                     ChatView(model: model, conversationID: id, style: .window, fillsHeight: true)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if model.showTerminal, conversation.provider.isDeep {
+                    if model.showTerminal, conversation.provider.capabilities.requiresFolder {
                         Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 0.5)
                         TerminalPane(model: model, conversation: conversation)
                             .frame(width: PanelModel.terminalWidth)
@@ -427,6 +427,8 @@ struct TabStrip: View {
             }
         }
         .onHover { inside in if inside { hovered = id } else if hovered == id { hovered = nil } }
+        // Quick Chat tabs can also be dragged to its room target before a room exists.
+        .modifier(TabDragSource(conversation: conversation, enabled: model.roomActive || compact))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityLabel("\(conversation.title), \(caption(conversation))")

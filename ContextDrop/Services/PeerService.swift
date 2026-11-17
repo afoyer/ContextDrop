@@ -224,7 +224,7 @@ final class PeerService: NSObject {
 
     fileprivate func handleFound(_ peerID: MCPeerID, info: [String: String]?) {
         guard peerID != myPeerID else { return }
-        peers.removeAll { $0.peerID != peerID && $0.name == peerID.displayName && !$0.isNearby }
+        // Equal display names do not imply that two discovered Macs are the same peer.
         let device = String((info?["device"] ?? "Mac").prefix(40))
         if let i = peers.firstIndex(where: { $0.peerID == peerID }) {
             peers[i].isNearby = true
@@ -447,6 +447,15 @@ extension PeerService: MCNearbyServiceBrowserDelegate {
 enum LocalIdentity {
     private static let displayNameKey = "ContextDrop.displayName"
     private static var defaults: UserDefaults { .standard }
+
+    /// Stable installation identity; changing the visible name never changes room ownership.
+    static var memberID: String {
+        let key = "ContextDrop.memberID"
+        if let id = defaults.string(forKey: key), UUID(uuidString: id) != nil { return id }
+        let id = UUID().uuidString
+        defaults.set(id, forKey: key)
+        return id
+    }
 
     static func displayName() -> String {
         sanitize(defaults.string(forKey: displayNameKey) ?? "")

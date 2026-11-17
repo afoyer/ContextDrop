@@ -70,7 +70,7 @@ struct RoomTakeHomeSheet: View {
             guard !seeded else { return }
             seeded = true
             // Start with what is most likely wanted: chats, and this person's own cards.
-            chosen = Set(tiles.filter { $0.chat != nil || $0.addedBy == store.localName }.map(\.id))
+            chosen = Set(tiles.filter { $0.chat != nil || $0.addedByID == store.localID }.map(\.id))
         }
     }
 

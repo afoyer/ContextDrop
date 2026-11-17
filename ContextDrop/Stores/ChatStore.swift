@@ -41,10 +41,7 @@ final class ChatStore {
 
     /// Empty chats that must survive (they are open as tabs).
     @ObservationIgnored var keepEmptyConversations: () -> Set<UUID> = { [] }
-    @ObservationIgnored private var runningTasks: [UUID: Task<Void, Never>] = [:]
-    @ObservationIgnored private var handles: [UUID: RunHandle] = [:]
-    @ObservationIgnored private var routingTokens: [UUID: UUID] = [:]
-    @ObservationIgnored private var retryApprovals: [UUID: PermissionRequest] = [:]
+    @ObservationIgnored private let runCoordinator = ChatRunCoordinator()
 
     init(peers: PeerService) {
         self.peers = peers
@@ -91,15 +88,19 @@ final class ChatStore {
         mutate(id) { $0.permissionLevel = level }
     }
 
+    func markUntrustedContent(in id: UUID) {
+        mutate(id) { $0.containsUntrustedContent = true }
+    }
+
     func setPinnedSkills(_ skills: [String], for id: UUID) {
         mutate(id) { $0.pinnedSkills = skills }
     }
 
     /// Stops every running agent (the app is quitting).
     func stopAll() {
-        for handle in handles.values { handle.interrupt() }
-        for task in runningTasks.values { task.cancel() }
-        for id in Array(routingTokens.keys) { stop(id) }
+        for handle in runCoordinator.handles.values { handle.cancel() }
+        for task in runCoordinator.tasks.values { task.cancel() }
+        for id in Array(runCoordinator.routingTokens.keys) { stop(id) }
     }
 
     var recentConversations: [Conversation] {
@@ -155,7 +156,7 @@ final class ChatStore {
     /// (a room follow-up from someone else). The chat's own setting is left as it is.
     func ask(_ rawText: String, attachments: [Attachment] = [], skills: [String] = [], levelCap: PermissionLevel? = nil, in id: UUID) {
         guard let text = appendQuestion(rawText, attachments: attachments, skills: skills, in: id), let conversation = conversation(id) else { return }
-        if conversation.provider.isDeep && conversation.folder == nil { return } // answered once a folder is chosen
+        if conversation.provider.capabilities.requiresFolder && conversation.folder == nil { return } // answered once a folder is chosen
         startAnswer(in: id, prompt: text, images: attachments, provider: conversation.provider,
                     level: levelCap.map { conversation.permissionLevel.capped(at: $0) })
     }
@@ -196,7 +197,7 @@ final class ChatStore {
     }
 
     func stop(_ id: UUID) {
-        if routingTokens.removeValue(forKey: id) != nil {
+        if runCoordinator.routingTokens.removeValue(forKey: id) != nil {
             mutate(id) { conversation in
                 conversation.isRouting = false
                 conversation.messages.append(Message(role: .assistant, author: "Auto", text: "Stopped."))
@@ -204,9 +205,7 @@ final class ChatStore {
             runningConversationIDs.remove(id)
             onActivityChanged?()
         }
-        retryApprovals[id] = nil
-        handles[id]?.interrupt()
-        runningTasks[id]?.cancel()
+        _ = runCoordinator.stop(id)
     }
 
     func toggleKeep(_ messageID: UUID, in id: UUID) {
@@ -229,7 +228,7 @@ final class ChatStore {
     /// The separately configured coding CLI, falling back to another ready CLI.
     func preferredDeepProvider() -> ProviderKind? {
         let preferred = AppDefaults.preferredCLI
-        if preferred.isDeep, status(preferred).isReady { return preferred }
+        if preferred.capabilities.requiresFolder, status(preferred).isReady { return preferred }
         return ProviderKind.deep.first { status($0).isReady }
     }
 
@@ -238,7 +237,7 @@ final class ChatStore {
     func askAuto(_ rawText: String, attachments: [Attachment], in id: UUID) async -> Bool {
         guard let text = appendQuestion(rawText, attachments: attachments, in: id) else { return false }
         let token = UUID()
-        routingTokens[id] = token
+        runCoordinator.routingTokens[id] = token
         mutate(id) { $0.isRouting = true }
         runningConversationIDs.insert(id)
 
@@ -253,11 +252,11 @@ final class ChatStore {
             defaultFolder: (AppDefaults.folder ?? AppDefaults.lastFolder).map(FolderDrop.display),
             selectedFolder: conversation(id)?.folder.map(FolderDrop.display),
             workPreferences: AppDefaults.routeCLIByTask ? AppDefaults.cliWorkPreferences : nil)
-        guard routingTokens[id] == token, conversation(id) != nil else { return false }
-        routingTokens[id] = nil
+        guard runCoordinator.routingTokens[id] == token, conversation(id) != nil else { return false }
+        runCoordinator.routingTokens[id] = nil
 
         var folder: URL?
-        let deep = status(decision.provider).isReady && decision.provider.isDeep ? decision.provider : preferredDeepProvider()
+        let deep = status(decision.provider).isReady && decision.provider.capabilities.requiresFolder ? decision.provider : preferredDeepProvider()
         if decision.route == .code, let deep {
             decision.provider = deep
             // An explicitly selected folder wins. A missing named folder must not silently use a different project.
@@ -277,7 +276,7 @@ final class ChatStore {
         }
         runningConversationIDs.remove(id)
 
-        if decision.provider.isDeep && conversation(id)?.folder == nil { return true }
+        if decision.provider.capabilities.requiresFolder && conversation(id)?.folder == nil { return true }
         if let folder { AppDefaults.lastFolder = folder }
         startAnswer(in: id, prompt: text, images: attachments, provider: decision.provider)
         return false
@@ -286,10 +285,11 @@ final class ChatStore {
     /// "Use OpenAI instead": re-answer the routed question as a quick answer.
     func useQuickAnswer(in id: UUID) {
         guard let conversation = conversation(id) else { return }
+        let previous = runCoordinator.tasks[id]
         stop(id)
         Task { @MainActor in
-            // Let a stopped run unwind before replacing its answer.
-            while isRunning(id) { try? await Task.sleep(for: .milliseconds(50)) }
+            // The previous provider must finish cancellation before a replacement begins.
+            if let previous { await previous.value }
             guard let question = conversation.messages.last(where: { $0.role == .user }) else { return }
             mutate(id) { c in
                 if let last = c.messages.last, last.role == .assistant { c.messages.removeLast() }
@@ -305,7 +305,7 @@ final class ChatStore {
 
     /// A deep chat whose last question has no answer yet (it was waiting for a folder): answer it now.
     private func answerPendingQuestion(_ id: UUID) {
-        guard let conversation = conversation(id), conversation.provider.isDeep, conversation.folder != nil, !isRunning(id),
+        guard let conversation = conversation(id), conversation.provider.capabilities.requiresFolder, conversation.folder != nil, !isRunning(id),
               let last = conversation.messages.last, last.role == .user else { return }
         startAnswer(in: id, prompt: last.text, images: last.attachments, provider: conversation.provider)
     }
@@ -320,10 +320,12 @@ final class ChatStore {
         finishedUnseen.remove(id)
         onActivityChanged?()
 
-        runningTasks[id] = Task { [weak self] in
+        let generation = runCoordinator.begin(id)
+        runCoordinator.tasks[id] = Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.run(provider, in: id, answerID: answer.id, prompt: prompt, attachments: images, skills: skills, level: level)
+                try await self.run(provider, in: id, answerID: answer.id, generation: generation, prompt: prompt, attachments: images, skills: skills, level: level)
+                guard self.runCoordinator.isCurrent(id, generation: generation) else { return }
                 self.mutateMessage(id, answer.id) { message in
                     message.isStreaming = false
                     if message.text.isEmpty && message.steps.isEmpty && message.permissions.isEmpty && message.changes.isEmpty {
@@ -332,9 +334,10 @@ final class ChatStore {
                 }
                 self.terminals[id]?.finishRun(Task.isCancelled ? .stopped : .finished)
             } catch {
+                guard self.runCoordinator.isCurrent(id, generation: generation) else { return }
                 let cancelled = error.isCancellation
                 self.terminals[id]?.finishRun(cancelled ? .stopped : .failed)
-                if !cancelled, provider.isDeep {
+                if !cancelled, provider.capabilities.requiresFolder {
                     self.terminals[id, default: TerminalState()].append(.error, error.userMessage)
                 }
                 self.mutateMessage(id, answer.id) { message in
@@ -343,45 +346,39 @@ final class ChatStore {
                         if message.text.isEmpty { message.text = "Stopped." }
                     } else {
                         message.error = error.userMessage
-                        message.failure = (error as? ProviderError)?.failure ?? (provider.isDeep ? .agentStopped : .noResponse)
+                        message.failure = (error as? ProviderError)?.failure ?? (provider.capabilities.requiresFolder ? .agentStopped : .noResponse)
                     }
                 }
             }
+            guard self.runCoordinator.isCurrent(id, generation: generation) else { return }
             self.mutateMessage(id, answer.id) { $0.settle() }
             self.runningConversationIDs.remove(id)
-            self.runningTasks[id] = nil
-            self.handles[id] = nil
-            self.retryApprovals[id] = nil
+            self.runCoordinator.finish(id, generation: generation)
             if !self.visibleConversations().contains(id) { self.finishedUnseen.insert(id) }
             self.onActivityChanged?()
         }
     }
 
     /// Runs one answer with the chat's provider and applies what it streams back.
-    private func run(_ kind: ProviderKind, in id: UUID, answerID: UUID, prompt: String, attachments: [Attachment], skills: [String],
+    private func run(_ kind: ProviderKind, in id: UUID, answerID: UUID, generation: UUID, prompt: String, attachments: [Attachment], skills: [String],
                      level override: PermissionLevel?) async throws {
         guard let conversation = conversation(id) else { return }
-        if kind.isDeep, conversation.folder == nil { throw ProviderError.noFolder }
+        if kind.capabilities.requiresFolder, conversation.folder == nil { throw ProviderError.noFolder }
         if !status(kind).isReady { refreshProviderStatus() }
-        let level = override ?? conversation.permissionLevel
+        let requestedLevel = override ?? conversation.permissionLevel
+        let level = conversation.containsUntrustedContent ? requestedLevel.capped(at: .ask) : requestedLevel
         let handle = RunHandle()
-        handles[id] = handle
+        runCoordinator.handles[id] = handle
         // Delegation needs the setting and the other CLI ready.
         let delegate = AppDefaults.delegateAgents && kind.delegatePartner.map { status($0).isReady } == true
         let request = ProviderRequest(conversation: conversation, prompt: prompt, attachments: attachments, skills: skills,
                                       level: level, delegate: delegate)
-        if kind.isDeep { terminals[id, default: TerminalState()].beginRun(level: level) }
+        if kind.capabilities.requiresFolder { terminals[id, default: TerminalState()].beginRun(level: level) }
 
-        var text = TextBatcher()
-        for try await event in Providers[kind].run(request, handle: handle) {
-            if case .text(let delta) = event {
-                if let chunk = text.add(delta) { apply(.text(chunk), conversationID: id, answerID: answerID) }
-                continue
-            }
-            if let rest = text.flush() { apply(.text(rest), conversationID: id, answerID: answerID) }
+        try await runCoordinator.execute(Providers[kind], request: request, handle: handle,
+                                         conversationID: id, generation: generation) { event in
             apply(event, conversationID: id, answerID: answerID)
         }
-        if let rest = text.flush() { apply(.text(rest), conversationID: id, answerID: answerID) }
     }
 
     private func apply(_ event: ProviderEvent, conversationID id: UUID, answerID: UUID) {
@@ -399,15 +396,15 @@ final class ChatStore {
     private func answerOnUsersBehalf(_ request: PermissionRequest, in id: UUID) -> Bool {
         guard request.live else { return false }
         let note: String
-        if let approved = retryApprovals[id], approved.tool == request.tool, Self.sameInput(approved.input, request.input) {
-            retryApprovals[id] = nil
+        if let approved = runCoordinator.retryApprovals[id], approved.tool == request.tool, Self.sameInput(approved.input, request.input) {
+            runCoordinator.retryApprovals[id] = nil
             note = "allowed approved retry: \(request.tool) \(request.summary.prefix(120))"
         } else if conversation(id)?.alwaysAllowed.contains(request.rule) == true {
             note = "allowed automatically (\(request.ruleLabel) are always allowed in this chat)"
         } else {
             return false
         }
-        handles[id]?.respond(requestID: request.id, allow: true, input: request.input)
+        runCoordinator.handles[id]?.answerPermission(request, allow: true)
         terminals[id, default: TerminalState()].append(.info, note)
         return true
     }
@@ -439,16 +436,16 @@ final class ChatStore {
     func allow(_ requestID: String, in id: UUID, always: Bool = false) {
         guard let (message, request) = locate(requestID, in: id), request.status == .pending else { return }
         if request.live {
-            guard let handle = handles[id] else { return }
+            guard let handle = runCoordinator.handles[id] else { return }
             if always { mutate(id) { $0.alwaysAllowed.insert(request.rule) } }
-            handle.respond(requestID: request.id, allow: true, input: request.input)
+            handle.answerPermission(request, allow: true)
             mutateMessage(id, message.id) { message in
                 if let i = message.permissions.firstIndex(where: { $0.id == requestID }) { message.permissions[i].status = .allowed }
                 // Also answer other waiting requests the new rule covers.
                 guard always else { return }
                 for i in message.permissions.indices where message.permissions[i].status == .pending
                     && message.permissions[i].live && message.permissions[i].rule == request.rule {
-                    handle.respond(requestID: message.permissions[i].id, allow: true, input: message.permissions[i].input)
+                    handle.answerPermission(message.permissions[i], allow: true)
                     message.permissions[i].status = .allowed
                 }
             }
@@ -465,15 +462,14 @@ final class ChatStore {
             if let i = message.permissions.firstIndex(where: { $0.id == requestID }) { message.permissions[i].status = .allowed }
         }
         mutate(id) { $0.messages.append(Message(role: .user, author: "You", text: "Allow: \(what)")) }
-        if retry.asksAgain && !always { retryApprovals[id] = request }
+        if retry.asksAgain && !always { runCoordinator.retryApprovals[id] = request }
         startAnswer(in: id, prompt: retry.prompt, provider: conversation.provider, level: retry.level)
     }
 
     func deny(_ requestID: String, in id: UUID, reason: String? = nil) {
         guard let (message, request) = locate(requestID, in: id), request.status == .pending else { return }
         if request.live {
-            handles[id]?.respond(requestID: request.id, allow: false,
-                                    message: reason ?? "The user said no to this. Don't retry it; continue another way or explain what you need.")
+            runCoordinator.handles[id]?.answerPermission(request, allow: false, reason: reason ?? "The user said no to this. Don't retry it; continue another way or explain what you need.")
             terminals[id, default: TerminalState()].append(.info, "denied: \(request.tool) \(request.summary.prefix(120))")
         }
         mutateMessage(id, message.id) { message in
@@ -492,10 +488,7 @@ final class ChatStore {
         guard !text.isEmpty else { return }
         question.items[index].answer = text
         if question.current == nil {
-            var input = (try? JSONSerialization.jsonObject(with: question.input)) as? [String: Any] ?? [:]
-            input["answers"] = Dictionary(question.items.map { ($0.question, $0.answer ?? "") }, uniquingKeysWith: { first, _ in first })
-            let data = (try? JSONSerialization.data(withJSONObject: input)) ?? question.input
-            handles[id]?.respond(requestID: question.id, allow: true, input: data)
+            runCoordinator.handles[id]?.answerQuestion(question)
             question.status = .answered
             terminals[id, default: TerminalState()].append(.result, "answered: \(question.items.compactMap(\.answer).joined(separator: " · "))")
         }

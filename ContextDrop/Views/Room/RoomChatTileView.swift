@@ -21,13 +21,14 @@ struct RoomChatTileView: View {
     var onTyping: (Bool) -> Void = { _ in }
 
     @State private var dropTargeted = false
+    @State private var transcriptJump = 0
     @FocusState private var composerFocused: Bool
 
     private var isFull: Bool { style == .full }
     private var collapsed: Bool { tile.collapsed && !isFull }
-    private var ownerHere: Bool { store.isPresent(chat.ownerName) }
+    private var ownerHere: Bool { store.members.contains { $0.id == chat.ownerID } }
     private var canType: Bool { store.isActive && ownerHere }
-    private var isMine: Bool { chat.ownerName == store.localName }
+    private var isMine: Bool { chat.ownerID == store.localID }
     private var possessive: String { isMine ? "Yours" : "\(chat.ownerName)’s" }
     /// What this Mac is typing here. Kept in the store so the tile and its popped-out tab share it.
     private var draft: String { store.chatDrafts[tile.id] ?? "" }
@@ -222,34 +223,27 @@ struct RoomChatTileView: View {
     // MARK: Conversation
 
     private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 13) {
-                    if chat.messages.isEmpty {
-                        Text(canType ? "Ask something. Everyone in the room sees this chat and can reply." : "No messages.")
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(.tertiary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    ForEach(chat.messages) { message in
-                        RoomChatMessageView(message: message, large: isFull).id(message.id)
-                    }
-                    Color.clear.frame(height: 1).id("end")
+        RoomTranscriptScrollView(jumpRequest: transcriptJump) {
+            VStack(alignment: .leading, spacing: 13) {
+                if chat.messages.isEmpty {
+                    Text(canType ? "Ask something. Everyone in the room sees this chat and can reply." : "No messages.")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
+                ForEach(chat.messages) { message in
+                    RoomChatMessageView(message: message, large: isFull).id(message.id)
+                }
             }
-            .frame(height: isFull ? nil : RoomMetrics.chatTranscriptHeight)
-            .frame(maxHeight: isFull ? .infinity : nil)
-            .onAppear { proxy.scrollTo("end", anchor: .bottom) }
-            .onChange(of: chat.messages.count) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
-            .onChange(of: chat.messages.last?.text.utf8.count) { _, _ in
-                if chat.messages.last?.streaming == true { proxy.scrollTo("end", anchor: .bottom) }
-            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
         }
+        .frame(height: isFull ? nil : RoomMetrics.chatTranscriptHeight)
+        .frame(maxHeight: isFull ? .infinity : nil)
     }
 
     private var composer: some View {
+        VStack(alignment: .leading, spacing: 4) {
         HStack(spacing: 10) {
             TextField(canType ? "Anyone here can reply…" : (ownerHere ? "The room has ended" : "\(chat.ownerName) left, so this chat can’t answer"),
                       text: Binding(get: { draft }, set: { store.chatDrafts[tile.id] = $0 }), axis: .vertical)
@@ -258,7 +252,7 @@ struct RoomChatTileView: View {
                 .lineLimit(1...(isFull ? 8 : 4))
                 .focused($composerFocused)
                 .onSubmit(send)
-                .disabled(!canType)
+                .disabled(!canType || store.sendingChatTiles.contains(tile.id))
             Button(action: pickFiles) {
                 Image(systemName: "paperclip")
                     .font(.system(size: 13, weight: .medium))
@@ -280,16 +274,27 @@ struct RoomChatTileView: View {
             .disabled(!sendable)
             .accessibilityLabel("Send")
         }
+        if store.sendingChatTiles.contains(tile.id) {
+            Text(store.slowChatTiles.contains(tile.id)
+                 ? "Still waiting for the host. Your message is saved."
+                 : "Sending to host…")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .accessibilityAddTraits(.updatesFrequently)
+        }
+        }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
     }
 
-    private var sendable: Bool { canType && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var sendable: Bool {
+        canType && !store.sendingChatTiles.contains(tile.id) && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     private func send() {
         guard sendable else { return }
-        store.sendChat(draft, in: tile.id)
-        store.chatDrafts[tile.id] = nil
+        if store.sendChat(draft, in: tile.id) { transcriptJump += 1 }
     }
 
     private func pickFiles() {
@@ -369,7 +374,10 @@ struct RoomChatMessageView: View, Equatable {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(message.failed ? AnyShapeStyle(RoomPalette.waitingLabel) : AnyShapeStyle(.secondary))
                     .lineLimit(2)
-                if message.text.isEmpty {
+                if let reason = message.failureReason {
+                    Text(reason).font(.system(size: 11)).foregroundStyle(RoomPalette.waitingLabel)
+                }
+                if message.text.isEmpty && message.streaming {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)
                         Text("Thinking…").font(.system(size: 12.5)).foregroundStyle(.tertiary)
@@ -548,5 +556,77 @@ enum RoomThumbnails {
         guard let data = file.thumbnail, let image = NSImage(data: data) else { return nil }
         cache.setObject(image, forKey: file.id as NSUUID)
         return image
+    }
+}
+
+// MARK: - Room transcript scrolling
+
+/// Tracks actual scroll geometry instead of a lazy sentinel's appearance (which can be prefetched).
+/// Content growth preserves the previous follow policy; only scrolling changes the reader's intent.
+struct RoomTranscriptScrollView<Content: View>: View {
+    var jumpRequest = 0
+    @ViewBuilder var content: () -> Content
+    @State private var followsEnd = true
+    @State private var previousBounds: CGRect?
+    @State private var coordinateSpace = UUID()
+    private let endID = "room-transcript-end"
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            GeometryReader { viewport in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        content()
+                        Color.clear.frame(height: 1).id(endID)
+                    }
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(key: RoomTranscriptBoundsKey.self,
+                                                   value: geometry.frame(in: .named(coordinateSpace)))
+                        }
+                    }
+                }
+                .coordinateSpace(name: coordinateSpace)
+                .onPreferenceChange(RoomTranscriptBoundsKey.self) { bounds in
+                    guard let bounds else { return }
+                    let previous = previousBounds
+                    previousBounds = bounds
+                    if let previous, abs(previous.height - bounds.height) < 0.5 {
+                        // A layout growth must not be mistaken for the reader leaving the bottom.
+                        if abs(previous.minY - bounds.minY) > 0.5 {
+                            followsEnd = bounds.maxY <= viewport.size.height + 24
+                        }
+                    } else if followsEnd {
+                        proxy.scrollTo(endID, anchor: .bottom)
+                    }
+                }
+                .onAppear { proxy.scrollTo(endID, anchor: .bottom) }
+                .onChange(of: jumpRequest) { _, _ in
+                    followsEnd = true
+                    proxy.scrollTo(endID, anchor: .bottom)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !followsEnd {
+                        Button {
+                            followsEnd = true
+                            proxy.scrollTo(endID, anchor: .bottom)
+                        } label: {
+                            Label("Jump to latest", systemImage: "arrow.down")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .padding(8)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct RoomTranscriptBoundsKey: PreferenceKey {
+    static var defaultValue: CGRect? { nil }
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
     }
 }

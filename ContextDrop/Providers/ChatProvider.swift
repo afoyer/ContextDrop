@@ -27,7 +27,44 @@ extension ChatProvider {
 }
 
 /// The handle `ChatStore` keeps for a running answer.
-typealias RunHandle = CLIRunner.Handle
+/// Provider-neutral controls for the active run. Adapters bind their native implementation.
+final class RunHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var cancelAction: (@Sendable () -> Void)?
+    private var permissionAction: (@Sendable (PermissionRequest, Bool, String?) -> Void)?
+    private var questionAction: (@Sendable (AgentQuestion) -> Void)?
+
+    func bind(cancel: @escaping @Sendable () -> Void,
+              permission: (@Sendable (PermissionRequest, Bool, String?) -> Void)? = nil,
+              question: (@Sendable (AgentQuestion) -> Void)? = nil) {
+        let shouldCancel = lock.withLock { () -> Bool in
+            cancelAction = cancel
+            permissionAction = permission
+            questionAction = question
+            return cancelled
+        }
+        if shouldCancel { cancel() }
+    }
+
+    func cancel() {
+        let action = lock.withLock { () -> (@Sendable () -> Void)? in
+            cancelled = true
+            return cancelAction
+        }
+        action?()
+    }
+    @discardableResult func answerPermission(_ request: PermissionRequest, allow: Bool, reason: String? = nil) -> Bool {
+        guard let action = lock.withLock({ permissionAction }) else { return false }
+        action(request, allow, reason)
+        return true
+    }
+    @discardableResult func answerQuestion(_ question: AgentQuestion) -> Bool {
+        guard let action = lock.withLock({ questionAction }) else { return false }
+        action(question)
+        return true
+    }
+}
 
 /// Everything a provider gets to answer with.
 struct ProviderRequest: Sendable {

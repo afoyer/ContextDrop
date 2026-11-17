@@ -17,11 +17,30 @@ enum ProviderKind: String, Codable, CaseIterable, Sendable, Identifiable {
         }
     }
 
-    /// Deep providers run a local CLI agent inside a project folder (they need one, and get the activity pane).
-    var isDeep: Bool { self != .openAI }
+    struct Capabilities: Sendable, Equatable {
+        var requiresFolder: Bool
+        var showsTerminal: Bool
+        var supportsInteractiveControl: Bool
+        var supportsContinuation: Bool
+        var supportsAttachments: Bool
+    }
 
-    /// Every deep provider, in the order they are preferred.
-    static var deep: [ProviderKind] { allCases.filter(\.isDeep) }
+    var capabilities: Capabilities {
+        switch self {
+        case .openAI:
+            Capabilities(requiresFolder: false, showsTerminal: false, supportsInteractiveControl: false,
+                         supportsContinuation: false, supportsAttachments: true)
+        case .claudeCode:
+            Capabilities(requiresFolder: true, showsTerminal: true, supportsInteractiveControl: true,
+                         supportsContinuation: true, supportsAttachments: true)
+        case .codex:
+            Capabilities(requiresFolder: true, showsTerminal: true, supportsInteractiveControl: false,
+                         supportsContinuation: true, supportsAttachments: true)
+        }
+    }
+
+    /// Local coding agents, in preference order.
+    static var deep: [ProviderKind] { allCases.filter(\.capabilities.requiresFolder) }
 
     var shortcutDigit: Character {
         switch self {
@@ -41,7 +60,7 @@ enum ProviderKind: String, Codable, CaseIterable, Sendable, Identifiable {
     }
 
     var slashSubtitle: String {
-        isDeep ? "Ask \(displayName) (reads a folder on this Mac)" : "Quick answer from \(displayName)"
+        capabilities.requiresFolder ? "Ask \(displayName) (reads a folder on this Mac)" : "Quick answer from \(displayName)"
     }
 
     /// Shown beside "Thinking…".

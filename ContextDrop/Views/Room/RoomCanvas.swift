@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// A card being written or edited locally. Nothing is shared until it is committed.
 struct RoomDraft: Equatable {
@@ -71,6 +72,10 @@ struct RoomCanvas: View {
     @State private var pinchStart: CGFloat?
     /// The chat tile a dragged run would be added to.
     @State private var runTarget: UUID?
+    /// Where a tab dragged in from Quick Chat or the workspace would land.
+    @State private var tabLanding: TabLanding?
+    @State private var submittingDraft = false
+    @State private var slowDraft = false
     @FocusState private var focusedCard: UUID?
 
     private static let space = "roomCanvas"
@@ -97,6 +102,7 @@ struct RoomCanvas: View {
             .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
             .clipped()
             .contentShape(Rectangle())
+            .onDrop(of: [.contextDropTab], delegate: TabDropDelegate(hover: hoverTab, perform: dropTab))
             .simultaneousGesture(pinch)
             .background {
                 RoomCanvasInput(onScroll: scroll, onMiddleDrag: { delta in
@@ -131,7 +137,7 @@ struct RoomCanvas: View {
         Color.clear
             .contentShape(Rectangle())
             .gesture(SpatialTapGesture(count: 2).onEnded { value in
-                guard interactive else { return }
+                guard interactive, !submittingDraft else { return }
                 commitDraft()
                 onInteract()
                 selection = []
@@ -196,7 +202,7 @@ struct RoomCanvas: View {
             return true
         }
         let spot = viewport.toCanvas(point)
-        if tiles.contains(where: { $0.chat != nil && !$0.collapsed && rect(of: $0).contains(spot) }) { return false }
+        if tiles.contains(where: { RoomMetrics.scrollsInside($0) && rect(of: $0).contains(spot) }) { return false }
         viewport.offset.width += delta.width
         viewport.offset.height += delta.height
         return true
@@ -214,15 +220,21 @@ struct RoomCanvas: View {
             ForEach(shown) { tile in
                 tileItem(tile)
                     .opacity(draft?.cardID == tile.id ? 0 : 1)
-                    .offset(x: tile.x, y: tile.y)
+                    .offset(x: store.displayPosition(of: tile).x, y: store.displayPosition(of: tile).y)
                     .zIndex(dragStart[tile.id] != nil ? 2 : selection.contains(tile.id) ? 1 : 0)
+            }
+            if let landing = tabLanding {
+                TabDropZone(landing: landing)
+                    .offset(x: landing.origin.x, y: landing.origin.y)
+                    .zIndex(4)
             }
             if let current = draft {
                 RoomDraftEditor(text: Binding(get: { draft?.text ?? "" }, set: { draft?.text = $0 }),
                                 isNew: current.cardID == nil,
                                 kind: current.cardID.flatMap { store.tile($0)?.card?.kind } ?? .thought,
+                                sending: submittingDraft, slow: slowDraft,
                                 onCommit: commitDraft,
-                                onCancel: { draft = nil })
+                                onCancel: { if !submittingDraft { draft = nil } })
                     .offset(x: current.point.x, y: current.point.y)
                     .zIndex(3)
             }
@@ -259,7 +271,8 @@ struct RoomCanvas: View {
                              onTyping: { if $0 { typing.insert(tile.id) } else { typing.remove(tile.id) } })
         case .run(let run):
             RoomRunTileView(store: store, tile: tile, run: run, onWatch: { onWatch(tile.id) },
-                            onOpenOwnRun: onOpenOwnRun.map { open in { open(tile.id) } })
+                            onOpenOwnRun: onOpenOwnRun.map { open in { open(tile.id) } },
+                            onTyping: { if $0 { typing.insert(tile.id) } else { typing.remove(tile.id) } })
         }
     }
 
@@ -268,7 +281,7 @@ struct RoomCanvas: View {
         let radius = RoomMetrics.radius(for: tile)
         return content(tile)
             .overlay {
-                if runTarget == tile.id {
+                if runTarget == tile.id || tabLanding?.chatID == tile.id {
                     RoundedRectangle(cornerRadius: radius + 2, style: .continuous)
                         .strokeBorder(RoomPalette.running, style: StrokeStyle(lineWidth: 2, dash: [6, 5]))
                         .padding(-2)
@@ -386,6 +399,51 @@ struct RoomCanvas: View {
         tiles.last { $0.chat != nil && $0.chat?.runIDs.contains(runID) == false && rect(of: $0).contains(point) }?.id
     }
 
+    // MARK: Tabs dragged in (R5 board 6 B)
+
+    /// Where `conversation` would land if let go at `point` (canvas points): centred under the pointer, or,
+    /// over a chat, beside that chat and connected to it.
+    private func landing(for conversation: Conversation, at point: CGPoint) -> TabLanding? {
+        let share = conversation.provider.roomShare
+        guard interactive, share != .none else { return nil }
+        let width = share == .liveRun ? RoomMetrics.runWidth : RoomMetrics.chatWidth
+        let title = conversation.title.isEmpty ? "New chat" : conversation.title
+        let existing = store.runs.tileID(for: conversation.id).flatMap(store.tile)?.id
+        let chat = share == .liveRun
+            ? tiles.last { tile in
+                guard let chat = tile.chat, rect(of: tile).contains(point) else { return false }
+                return existing.map { !chat.runIDs.contains($0) } ?? true
+            }
+            : nil
+        if let chat {
+            let frame = rect(of: chat)
+            let origin = existing.flatMap(store.tile).map(\.position)
+                ?? store.freeSpot(near: CGPoint(x: frame.maxX + 44, y: frame.minY))
+            return TabLanding(conversationID: conversation.id, title: title, origin: origin, width: width,
+                              chatID: chat.id, chatTitle: chat.chat?.title ?? "Chat")
+        }
+        return TabLanding(conversationID: conversation.id, title: title,
+                          origin: CGPoint(x: point.x - width / 2, y: point.y - 28), width: width)
+    }
+
+    private func hoverTab(_ location: CGPoint?) {
+        guard let location, let id = TabDrag.current, let conversation = store.chats?.conversation(id) else {
+            if tabLanding != nil { tabLanding = nil }
+            return
+        }
+        let next = landing(for: conversation, at: viewport.toCanvas(location))
+        if next != tabLanding { tabLanding = next }
+    }
+
+    private func dropTab(_ id: UUID, at location: CGPoint) {
+        tabLanding = nil
+        guard let conversation = store.chats?.conversation(id),
+              let landing = landing(for: conversation, at: viewport.toCanvas(location)) else { return }
+        onInteract()
+        guard let tileID = store.placeTab(conversation, at: landing.origin, connectingTo: landing.chatID) else { return }
+        store.whenTileAccepted(tileID) { selection = [tileID] }
+    }
+
     private func move(_ id: UUID, _ origin: CGPoint, _ translation: CGSize) {
         store.moveTile(id, to: CGPoint(x: origin.x + translation.width, y: origin.y + translation.height))
     }
@@ -406,20 +464,38 @@ struct RoomCanvas: View {
     // MARK: Writing
 
     private func beginEditing(_ tile: RoomTile) {
-        guard interactive, let card = tile.card else { return }
+        guard interactive, !submittingDraft, let card = tile.card else { return }
         commitDraft()
         draft = RoomDraft(cardID: tile.id, point: tile.position, text: card.text)
     }
 
     private func commitDraft() {
-        guard let current = draft else { return }
-        draft = nil
+        guard !submittingDraft, let current = draft else { return }
         let text = current.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty else { draft = nil; return }
+        let finish: @MainActor (String?) -> Void = { error in
+            submittingDraft = false
+            slowDraft = false
+            if error == nil, draft == current { draft = nil }
+            if error != nil, let id = current.cardID, store.tile(id) == nil { draft?.cardID = nil }
+        }
         if let id = current.cardID {
-            if store.tile(id)?.card?.text != text { store.editCard(id, text: text) }
-        } else if let id = store.addCard(kind: .thought, text: text, at: current.point) {
-            selection = [id]
+            guard store.tile(id)?.card?.text != text else { draft = nil; return }
+            submittingDraft = true
+            if !store.editCard(id, text: text, onAccepted: finish) { submittingDraft = false }
+        } else {
+            submittingDraft = true
+            if let id = store.addCard(kind: .thought, text: text, at: current.point, onAccepted: finish) {
+                store.whenTileAccepted(id) { selection = [id] }
+            } else {
+                submittingDraft = false
+            }
+        }
+        if submittingDraft {
+            Task {
+                try? await Task.sleep(for: .seconds(5))
+                if submittingDraft { slowDraft = true }
+            }
         }
     }
 }
@@ -480,6 +556,8 @@ private struct RoomDraftEditor: View {
     @Binding var text: String
     let isNew: Bool
     let kind: RoomCardBody.Kind
+    let sending: Bool
+    let slow: Bool
     let onCommit: () -> Void
     let onCancel: () -> Void
     @FocusState private var focused: Bool
@@ -494,14 +572,20 @@ private struct RoomDraftEditor: View {
                 .focused($focused)
                 .onSubmit(onCommit)
                 .onExitCommand(perform: onCancel)
+                .disabled(sending)
                 .accessibilityLabel(isNew ? "New thought" : "Card text")
+            if sending {
+                Text(slow ? "Still waiting for the host. Your text is saved." : "Sending to host…")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
             HStack(spacing: 8) {
                 HintItem(key: "↵", label: isNew ? "Add" : "Save")
                 HintItem(key: "esc", label: "Cancel")
                 Spacer(minLength: 0)
                 Button(isNew ? "Add" : "Save", action: onCommit)
                     .controlSize(.small)
-                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .font(.system(size: 10.5))
             .foregroundStyle(.secondary)

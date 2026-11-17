@@ -23,11 +23,27 @@ final class RoomWindowController {
     var isVisible: Bool { window?.isVisible ?? false }
 
     func show() {
+        let window = prepared()
+        // Quick Chat is a non-activating panel, so the app is usually not active when this runs. The cooperative
+        // `NSApp.activate()` is then turned down and the room opened behind the app in front; the other windows
+        // (workspace, Settings) already ask the way that works.
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    /// A tab is being dragged out of Quick Chat or the workspace (R5 board 6 B): put the room up front, under
+    /// the pointer, so it can be dropped on. Nothing is activated mid-drag; Quick Chat stays where it is.
+    func bringForwardForDrop() {
+        prepared().orderFrontRegardless()
+    }
+
+    private func prepared() -> NSWindow {
         let window = self.window ?? makeWindow()
         self.window = window
         window.title = store.room?.name ?? "Room"
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        return window
     }
 
     func close() {

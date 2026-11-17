@@ -24,9 +24,16 @@ protocol CLIAgent: Sendable {
     func delegateInstructions(level: PermissionLevel) -> String?
     /// How to run again after the user allowed something that was refused in a run that couldn't ask.
     func retry(afterApproving what: String) -> ApprovedRetry
+
+    /// Ways setup can install this CLI, in order of preference (`CLISetup`). Empty = setup can't install it.
+    var installOptions: [CLIInstallOption] { get }
+    /// Arguments that start the CLI's own sign-in (it opens the browser). Empty = setup can't sign it in.
+    var signInArguments: [String] { get }
 }
 
 extension CLIAgent {
+    var installOptions: [CLIInstallOption] { [] }
+    var signInArguments: [String] { [] }
     func openingInput(for request: CLIRunner.Request) -> [String: Any]? { nil }
     func adjust(environment: inout [String: String]) {}
     func prompt(_ text: String, skills: [String]) -> String { text }

@@ -18,10 +18,20 @@ struct RoomView: View {
     @State private var viewSize: CGSize = .zero
     @State private var sizes: [UUID: CGSize] = [:]
     @State private var question = ""
+    @State private var sendingAsk = false
+    @State private var slowAsk = false
+    @State private var askOperationToken: UUID?
     @State private var confirmLeave = false
     @State private var showTakeHome = false
     @State private var watching: UUID?
     @State private var typingTiles: Set<UUID> = []
+    /// Where the ask bar sends what is typed. Kept while this window is open.
+    @State private var askDestination: RoomAskDestination = .chat
+    /// The folder runs from the ask bar work in: the last folder a coding agent worked in until another is chosen.
+    /// Looked up when a run is first chosen as the destination.
+    @State private var runFolder: URL?
+    /// A level chosen in the ask bar for runs; nil uses the default from Settings › Providers.
+    @State private var runLevel: PermissionLevel?
     @FocusState private var askFocused: Bool
 
     var body: some View {
@@ -49,6 +59,9 @@ struct RoomView: View {
             selection = []
             draft = nil
             question = ""
+            sendingAsk = false
+            slowAsk = false
+            askOperationToken = nil
             sizes = [:]
             watching = nil
             typingTiles = []
@@ -92,7 +105,7 @@ struct RoomView: View {
     }
 
     private var hasOwnCards: Bool {
-        store.tiles.contains { $0.card != nil && $0.addedBy == store.localName }
+        store.tiles.contains { $0.card != nil && $0.addedByID == store.localID }
     }
 
     private var leaveTitle: String { store.isHost ? "End the room for everyone?" : "Leave the room?" }
@@ -101,7 +114,7 @@ struct RoomView: View {
         if store.isHost {
             return "You opened this room, so leaving ends it for everyone here. Chats you run here stop answering. You can each take things home afterwards."
         }
-        let owns = store.tiles.contains { ($0.chat != nil || $0.run != nil) && $0.ownerName == store.localName }
+        let owns = store.tiles.contains { ($0.chat != nil || $0.run != nil) && $0.ownerID == store.localID }
         return owns
             ? "Your cards stay until the room ends unless you take them. Chats and runs on your Mac stay on the canvas but stop updating."
             : "Your cards stay until the room ends unless you take them with you."
@@ -194,7 +207,7 @@ struct RoomView: View {
         var ring: [String: Color] = [:]
         for tile in store.liveRuns {
             guard let run = tile.run else { continue }
-            if case .running = run.state { ring[run.ownerName] = RoomPalette.running } else if ring[run.ownerName] == nil { ring[run.ownerName] = RoomPalette.waiting }
+            if case .running = run.state { ring[run.ownerID] = RoomPalette.running } else if ring[run.ownerID] == nil { ring[run.ownerID] = RoomPalette.waiting }
         }
         return HStack(spacing: 8) {
             HStack(spacing: -6) {
@@ -271,8 +284,10 @@ struct RoomView: View {
 
     /// Selects a tile that was just added and brings it into view.
     private func show(_ id: UUID) {
-        selection = [id]
-        reveal(id)
+        store.whenTileAccepted(id) {
+            selection = [id]
+            reveal(id)
+        }
     }
 
     private func newThought() {
@@ -321,7 +336,7 @@ struct RoomView: View {
                 VStack(spacing: 6) {
                     Text("Nothing in the room yet")
                         .font(.system(size: 14, weight: .semibold))
-                    Text("Ask something below to start a chat everyone can reply in.\nDouble-click to write a thought, or drop files onto a chat.")
+                    Text("Ask something below to start a chat everyone can reply in.\nDouble-click to write a thought, drop files onto a chat,\nor drag a Claude Code or Codex tab in from Quick Chat.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -369,6 +384,16 @@ struct RoomView: View {
         } else if let notice = store.notice {
             HStack(spacing: 8) {
                 Text(notice).font(.system(size: 12)).lineLimit(3)
+                if store.recoveredChatDraft != nil {
+                    Button("Restore draft") {
+                        if let recovered = store.recoveredChatDraft {
+                            question = question.isEmpty ? recovered : question + "\n\n" + recovered
+                            askDestination = .chat
+                            askFocused = true
+                            store.recoveredChatDraft = nil
+                        }
+                    }
+                }
                 Button { store.notice = nil } label: { Image(systemName: "xmark") }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
@@ -460,52 +485,104 @@ struct RoomView: View {
     private var askBar: some View {
         let tiles = selectedTiles
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let providers = RoomAskDestination.runProviders(store.chats)
+        let destination = currentDestination(providers)
+        let runProvider = destination.provider
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text(tiles.isEmpty ? "Nothing selected" : "\(tiles.count) selected")
+                Text("To")
                     .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(tiles.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(RoomPalette.chatLabel))
+                    .foregroundStyle(.secondary)
                     .fixedSize()
-                ForEach(tiles.prefix(4)) { tile in
-                    RoomChip(text: tile.shortLabel, color: RoomPalette.labelColor(for: tile))
-                }
-                if tiles.count > 4 {
-                    Text("+\(tiles.count - 4)").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                RoomAskDestinationMenu(destination: destination, selectedCount: tiles.count, providers: providers) {
+                    askDestination = $0
+                    if $0.provider != nil, runFolder == nil { runFolder = AppDefaults.lastFolder ?? AppDefaults.folder }
                 }
                 Spacer(minLength: 8)
-                Text(tiles.isEmpty ? "Everyone can see chats started here" : "The new chat starts from what you selected")
+                RoomAskBadge(acts: runProvider != nil)
+            }
+            .accessibilityElement(children: .contain)
+
+            HStack(spacing: 6) {
+                if runProvider != nil {
+                    // A run: where it works, what it may do, and what it starts from.
+                    RoomRunFolderChip(folder: runFolder) { _ = chooseRunFolder() }
+                    PermissionLevelMenu(level: runLevelOrDefault, compact: true,
+                                        help: "What the run may do on your Mac without asking you.") { runLevel = $0 }
+                    if !tiles.isEmpty {
+                        RoomChip(text: "+ \(tiles.count) selected", color: RoomPalette.chatLabel)
+                            .help(tiles.map(\.shortLabel).joined(separator: ", "))
+                    }
+                } else {
+                    Text(tiles.isEmpty ? "Nothing selected" : "\(tiles.count) selected")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(tiles.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(RoomPalette.chatLabel))
+                        .fixedSize()
+                    ForEach(tiles.prefix(4)) { tile in
+                        RoomChip(text: tile.shortLabel, color: RoomPalette.labelColor(for: tile))
+                    }
+                    if tiles.count > 4 {
+                        Text("+\(tiles.count - 4)").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                Text(selectionHint(empty: tiles.isEmpty, run: runProvider != nil))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: runProvider == nil ? .combine : .contain)
 
             HStack(spacing: 8) {
-                TextField("Ask the room…", text: $question)
+                TextField(destination.placeholder, text: $question)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
                     .focused($askFocused)
-                    .onSubmit { spawn(question: question, from: selection) }
-                Button {
-                    spawn(question: "", from: selection)
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(tiles.isEmpty ? "New chat" : "New chat from selection")
-                        Text("⌘N").foregroundStyle(.secondary)
+                    .onSubmit { submit(to: destination) }
+                    .disabled(sendingAsk)
+                if let runProvider {
+                    Button {
+                        startRun(runProvider)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Start run on my Mac").fontWeight(.semibold)
+                            Text("↵").opacity(0.8)
+                        }
                     }
-                }
-                .help("A new chat tile on your Mac, started from the selected chats, their files and the selected cards")
-                Button {
-                    spawn(question: question, from: selection)
-                } label: {
-                    HStack(spacing: 4) {
-                        Text("Ask")
-                        Text("↵").opacity(0.8)
+                    .buttonStyle(.borderedProminent)
+                    .tint(RoomPalette.go)
+                    .disabled(sendingAsk || trimmed.isEmpty)
+                    .help("Starts \(runProvider.displayName) in the folder on your Mac and puts the run in the room.")
+                    .accessibilityLabel("Start \(runProvider.displayName) run on my Mac")
+                } else {
+                    Button {
+                        spawn(question: "", from: selection)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(tiles.isEmpty ? "New chat" : "New chat from selection")
+                            Text("⌘N").foregroundStyle(.secondary)
+                        }
                     }
+                    .disabled(sendingAsk)
+                    .help("A new chat tile on your Mac, started from the selected chats, their files and the selected cards")
+                    Button {
+                        spawn(question: question, from: selection)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Ask")
+                            Text("↵").opacity(0.8)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(sendingAsk || trimmed.isEmpty)
+                    .accessibilityLabel("Ask the room")
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(trimmed.isEmpty)
-                .accessibilityLabel("Ask the room")
+            }
+            if sendingAsk {
+                Text(slowAsk ? "Still waiting for the host. Your question is saved." : "Sending to host…")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(12)
@@ -516,12 +593,82 @@ struct RoomView: View {
 
     /// A new chat tile on this Mac, started from `ids`. With a question it is asked straight away.
     private func spawn(question text: String, from ids: Set<UUID>) {
-        guard store.isActive else { return }
+        guard store.isActive, !sendingAsk else { return }
         let asked = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        guard let id = store.spawnChat(question: text, selected: ids) else { return }
-        if asked { question = "" }
-        selection = [id]
-        reveal(id)
+        if asked { beginAskWait() }
+        guard let id = store.spawnChat(question: text, selected: ids) else {
+            if asked { finishAskWait() }
+            return
+        }
+        if asked {
+            store.whenTileSettled(id) { error in
+                if error == nil, question == text { question = "" }
+                finishAskWait()
+            }
+        }
+        show(id)
+    }
+
+    /// Where the ask bar sends what is typed: the chosen run while its provider can still start one here,
+    /// otherwise a new chat.
+    private func currentDestination(_ providers: [(kind: ProviderKind, status: ProviderStatus)]) -> RoomAskDestination {
+        guard let provider = askDestination.provider,
+              providers.contains(where: { $0.kind == provider && $0.status.isReady }) else { return .chat }
+        return askDestination
+    }
+
+    /// Return in the ask bar.
+    private func submit(to destination: RoomAskDestination) {
+        if let provider = destination.provider { startRun(provider) } else { spawn(question: question, from: selection) }
+    }
+
+    private func selectionHint(empty: Bool, run: Bool) -> String {
+        if run { return empty ? "Select chats or cards to give it context" : "Starts from what you selected" }
+        return empty ? "Everyone can see chats started here" : "The new chat starts from what you selected"
+    }
+
+    private var runLevelOrDefault: PermissionLevel { runLevel ?? AppDefaults.permissionLevel }
+
+    /// Asks for the folder a run works in. Nil when cancelled.
+    private func chooseRunFolder() -> URL? {
+        guard let url = FilePicker.folders(prompt: "Use Folder", message: "Choose the project folder the run works in.").first else { return nil }
+        runFolder = url
+        return url
+    }
+
+    /// A run of `provider` on this Mac, started from the selection and already in the room.
+    private func startRun(_ provider: ProviderKind) {
+        guard store.isActive, !sendingAsk else { return }
+        let prompt = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, let folder = runFolder ?? chooseRunFolder() else { return }
+        beginAskWait()
+        guard let id = store.startRun(provider: provider, prompt: prompt, selected: selection,
+                                      folder: folder, level: runLevelOrDefault) else {
+            finishAskWait()
+            return
+        }
+        store.whenTileSettled(id) { error in
+            if error == nil, question.trimmingCharacters(in: .whitespacesAndNewlines) == prompt { question = "" }
+            finishAskWait()
+        }
+        show(id)
+    }
+
+    private func beginAskWait() {
+        sendingAsk = true
+        slowAsk = false
+        let token = UUID()
+        askOperationToken = token
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            if sendingAsk, askOperationToken == token { slowAsk = true }
+        }
+    }
+
+    private func finishAskWait() {
+        sendingAsk = false
+        slowAsk = false
+        askOperationToken = nil
     }
 
     // MARK: Lobby (no room yet)
@@ -610,7 +757,7 @@ struct RoomView: View {
         }
         let text = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let id = store.addCard(kind: .note, text: text) else { return }
-        selection = [id]
+        store.whenTileAccepted(id) { selection = [id] }
         if text.count > RoomLimits.maxTextLength {
             store.notice = "That was long, so the note keeps the first \(RoomLimits.maxTextLength.formatted()) characters."
         }

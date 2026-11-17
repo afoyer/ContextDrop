@@ -8,6 +8,20 @@ enum AppDefaults {
     private static let shareDetailKey = "ContextDrop.shareDetail"
     private static let openAIDetailKey = "ContextDrop.openAIDetail"
     private static let showTerminalKey = "ContextDrop.showTerminal"
+    private static let didFinishSetupKey = "ContextDrop.didFinishSetup"
+    private static let setupDeferredKey = "ContextDrop.setupDeferred"
+
+    /// The first-launch setup was completed (its last screen's Open Quick Chat).
+    static var didFinishSetup: Bool {
+        get { UserDefaults.standard.bool(forKey: didFinishSetupKey) }
+        set { UserDefaults.standard.set(newValue, forKey: didFinishSetupKey) }
+    }
+
+    /// Setup was put off with Set Up Later: it no longer opens at launch, and the menu bar offers to finish it.
+    static var setupDeferred: Bool {
+        get { UserDefaults.standard.bool(forKey: setupDeferredKey) }
+        set { UserDefaults.standard.set(newValue, forKey: setupDeferredKey) }
+    }
 
     /// The permission level new chats start with (Settings › Providers).
     static var permissionLevel: PermissionLevel {
@@ -57,12 +71,12 @@ enum AppDefaults {
     static var preferredCLI: ProviderKind {
         get {
             let saved = UserDefaults.standard.string(forKey: preferredCLIKey).flatMap(ProviderKind.init(rawValue:))
-            if let saved, saved.isDeep { return saved }
-            let initial: ProviderKind = provider.isDeep ? provider : .claudeCode
+            if let saved, saved.capabilities.requiresFolder { return saved }
+            let initial: ProviderKind = provider.capabilities.requiresFolder ? provider : .claudeCode
             UserDefaults.standard.set(initial.rawValue, forKey: preferredCLIKey)
             return initial
         }
-        set { if newValue.isDeep { UserDefaults.standard.set(newValue.rawValue, forKey: preferredCLIKey) } }
+        set { if newValue.capabilities.requiresFolder { UserDefaults.standard.set(newValue.rawValue, forKey: preferredCLIKey) } }
     }
 
     static var routeCLIByTask: Bool {

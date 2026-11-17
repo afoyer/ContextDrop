@@ -31,10 +31,16 @@ struct PanelActions {
     var pickImages: () -> Void = {}
     var addFolderShortcut: () -> Void = {}
     var openRoom: () -> Void = {}
+    /// Creates a room if needed, then puts a Quick Chat tab in it.
+    var putTabInRoom: (UUID) -> Void = { _ in }
     /// "To room": puts an answer on the table of the room you're in.
     var sendToRoom: (Message, Conversation) -> Void = { _, _ in }
-    /// "To room" on a whole tab: a Claude Code run becomes a run tile, an OpenAI chat a chat tile.
+    /// "To room" on an OpenAI tab: the chat becomes a chat tile. (A run tab has the room chip instead.)
     var sendTabToRoom: (Conversation) -> Void = { _ in }
+    /// The room chip: put a run in the room at a level, take it out, or change its level (by conversation id).
+    var shareRun: (Conversation, RunShareLevel) -> Void = { _, _ in }
+    var unshareRun: (UUID) -> Void = { _ in }
+    var setShareLevel: (UUID, RunShareLevel) -> Void = { _, _ in }
 }
 
 /// What the floating panel is showing, and the keyboard logic behind it.
@@ -119,8 +125,11 @@ final class PanelModel {
 
     /// What the panel asks the app to do (wired by the AppDelegate and the panel's controller).
     @ObservationIgnored var actions = PanelActions()
-    /// Whether "To room" is offered (you're in a live room).
-    var roomActive = false
+    /// The room you're in, for "To room" and the room chip. Nil when you aren't in one.
+    var room: PanelRoom?
+    var roomActive: Bool { room != nil }
+    /// The level a run was last put in the room at; ⌘⇧R shares the next one the same way.
+    var lastShareLevel: RunShareLevel = .steps
 
     init(store: ChatStore) {
         self.store = store
@@ -160,7 +169,7 @@ final class PanelModel {
     /// The terminal pane is shown for deep chats (Claude Code / Codex) in chat mode.
     var terminalVisible: Bool {
         guard showTerminal, case .chat(let id) = mode, let conversation = store.conversation(id) else { return false }
-        return conversation.provider.isDeep
+        return conversation.provider.capabilities.requiresFolder
     }
 
     /// The conversation shown in the panel, if any.
@@ -367,7 +376,7 @@ final class PanelModel {
         guard !store.isRunning(id) else { return }
         let attachments = input.pendingAttachments
         let skills = input.skills
-        if conversation.provider.isDeep && conversation.folder == nil {
+        if conversation.provider.capabilities.requiresFolder && conversation.folder == nil {
             if conversation.messages.last?.role == .user {
                 actions.chooseFolder(id)
                 return
@@ -405,11 +414,16 @@ final class PanelModel {
         input.focusedMessageID = target
     }
 
-    /// ⌘⇧R: put the focused (or latest) answer in the room. For a Claude Code or Codex chat, the run itself goes in.
+    /// ⌘⇧R: put the focused (or latest) answer in the room. For a Claude Code or Codex chat, the run itself goes in
+    /// at the last level used; if it is already there, the room opens instead.
     func sendFocusedToRoom(in id: UUID) {
         guard roomActive, let conversation = store.conversation(id) else { return }
         if conversation.provider.roomShare == .liveRun {
-            actions.sendTabToRoom(conversation)
+            if room?.runs[id] != nil {
+                actions.openRoom()
+            } else {
+                actions.shareRun(conversation, lastShareLevel)
+            }
             return
         }
         let input = session(id)
@@ -440,12 +454,12 @@ final class PanelModel {
         guard store.status(provider).isUsable else { return }
         if let id {
             store.setProvider(provider, for: id, asDefault: true)
-            if provider.isDeep, store.conversation(id)?.folder == nil { actions.chooseFolder(id) }
+            if provider.capabilities.requiresFolder, store.conversation(id)?.folder == nil { actions.chooseFolder(id) }
         } else {
             store.defaultProvider = provider
             store.autoRoute = false
             AppDefaults.provider = provider
-            if !provider.isDeep { homeFolder = nil }
+            if !provider.capabilities.requiresFolder { homeFolder = nil }
         }
         focusToken += 1
     }
@@ -453,7 +467,7 @@ final class PanelModel {
     /// ⇧Tab: the next permission level, on home (nil) or in a chat (from its next message).
     func cyclePermissionLevel(in id: UUID?) {
         if let id {
-            guard let conversation = store.conversation(id), conversation.provider.isDeep else { return }
+            guard let conversation = store.conversation(id), conversation.provider.capabilities.requiresFolder else { return }
             store.setPermissionLevel(conversation.permissionLevel.next, for: id)
         } else {
             homeLevel = homeLevel.next
@@ -497,4 +511,12 @@ final class PanelModel {
         session(id).draft = ""
         store.ask(question, in: id)
     }
+}
+
+/// What the panel shows of the room you're in.
+struct PanelRoom: Equatable {
+    var name: String
+    var people: Int
+    /// Which of your runs are in it (by conversation id), and how much of each is shown.
+    var runs: [UUID: RunShareLevel]
 }

@@ -9,6 +9,7 @@ struct MenuBarActions {
     var openWindow: () -> Void = {}
     var newChat: () -> Void = {}
     var openSettings: () -> Void = {}
+    var finishSetup: () -> Void = {}
     var openRoom: () -> Void = {}
     var dropCurrent: () -> Void = {}
     var close: () -> Void = {}
@@ -32,6 +33,7 @@ struct MenuBarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if !AppDefaults.didFinishSetup { finishSetupBanner }
             nearby
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -96,6 +98,21 @@ struct MenuBarView: View {
         }
         .frame(width: 360)
         .controlSize(.small)
+    }
+
+    // MARK: Setup
+
+    /// Shown until setup is finished (after Set Up Later): one click back into it.
+    private var finishSetupBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "sparkles").foregroundStyle(Color.accentColor).accessibilityHidden(true)
+            Text("Finish setting up ContextDrop").font(.system(size: 12.5))
+            Spacer()
+            Button("Finish Setup…") { actions.finishSetup() }
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 40)
+        .background(Color.accentColor.opacity(0.08))
     }
 
     // MARK: Nearby

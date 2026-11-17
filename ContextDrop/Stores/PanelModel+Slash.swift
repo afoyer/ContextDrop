@@ -21,9 +21,9 @@ extension PanelModel {
             }
         }
         if !homeSession.skills.isEmpty { return .forSkills }
-        if let provider { return provider.isDeep ? provider : nil }
+        if let provider { return provider.capabilities.requiresFolder ? provider : nil }
         if auto { return nil }
-        if store.defaultProvider.isDeep { return store.defaultProvider }
+        if store.defaultProvider.capabilities.requiresFolder { return store.defaultProvider }
         return folder != nil ? store.preferredDeepProvider() : nil
     }
 
@@ -75,7 +75,7 @@ extension PanelModel {
         }
         if text.isEmpty && pendingAttachments.isEmpty && !request.isEmpty {
             // Choosing a coding agent starts its setup now, even before there is a question.
-            if request.provider?.isDeep == true, let explicitProvider, explicitProvider.isDeep {
+            if request.provider?.capabilities.requiresFolder == true, let explicitProvider, explicitProvider.capabilities.requiresFolder {
                 selectProvider(explicitProvider, for: nil)
                 let id = store.newConversation(provider: explicitProvider)
                 store.setPermissionLevel(homeLevel, for: id)
@@ -100,7 +100,7 @@ extension PanelModel {
             if let explicitProvider {
                 selectProvider(explicitProvider, for: nil)
             } else if folder != nil && !autoRequested && !store.autoActive {
-                guard let deep = (store.defaultProvider.isDeep ? store.defaultProvider : nil)
+                guard let deep = (store.defaultProvider.capabilities.requiresFolder ? store.defaultProvider : nil)
                     ?? store.preferredDeepProvider() else {
                     notices.text = "Folder shortcuts need Claude Code or Codex on this Mac."
                     return
@@ -119,7 +119,7 @@ extension PanelModel {
         }
         // A folder picks a coding agent unless Auto or a provider was explicitly selected.
         if folder != nil && explicitProvider == nil && !autoRequested && !store.autoActive {
-            guard let deep = (!store.autoRoute && store.defaultProvider.isDeep ? store.defaultProvider : nil)
+            guard let deep = (!store.autoRoute && store.defaultProvider.capabilities.requiresFolder ? store.defaultProvider : nil)
                 ?? store.preferredDeepProvider() else {
                 notices.text = "Folder shortcuts need Claude Code or Codex on this Mac."
                 return
@@ -131,7 +131,7 @@ extension PanelModel {
         let provider = explicitProvider ?? store.defaultProvider
         let id = store.newConversation(provider: provider)
         // The chip's level; Auto routing hides the chip, so its chats keep the Settings default.
-        if provider.isDeep && !auto { store.setPermissionLevel(homeLevel, for: id) }
+        if provider.capabilities.requiresFolder && !auto { store.setPermissionLevel(homeLevel, for: id) }
         let attachments = pendingAttachments
         homeSession.resetComposer()
         homeFolder = nil
@@ -145,16 +145,16 @@ extension PanelModel {
             }
             return
         }
-        if provider.isDeep {
+        if provider.capabilities.requiresFolder {
             // An explicit agent command requires an explicit folder for this chat.
-            let target = request.provider?.isDeep == true ? folder : (folder ?? AppDefaults.folder ?? AppDefaults.lastFolder)
+            let target = request.provider?.capabilities.requiresFolder == true ? folder : (folder ?? AppDefaults.folder ?? AppDefaults.lastFolder)
             if let target {
                 store.setFolder(target, for: id)
             }
         }
         store.ask(text, attachments: attachments, skills: skills, in: id)
         // A deep chat without a folder keeps the question and answers it once one is chosen.
-        if provider.isDeep && store.conversation(id)?.folder == nil { actions.chooseFolder(id) }
+        if provider.capabilities.requiresFolder && store.conversation(id)?.folder == nil { actions.chooseFolder(id) }
     }
 
     // MARK: Slash commands
@@ -198,7 +198,7 @@ extension PanelModel {
         }
         session.requestFocus()
         focusToken += 1
-        if case .provider(let provider) = SlashCommand.command(for: item.token, folders: store.folders), provider.isDeep {
+        if case .provider(let provider) = SlashCommand.command(for: item.token, folders: store.folders), provider.capabilities.requiresFolder {
             let request = SlashRequest(draft: session.draft, folders: store.folders)
             if request.stop == nil, request.rest.isEmpty, request.provider == provider, !request.auto,
                session.pendingAttachments.isEmpty {
@@ -267,7 +267,7 @@ extension PanelModel {
         if request.auto { notices.text = "Auto picks the assistant for new chats. This chat keeps \(provider.displayName)." }
         // A folder needs a coding agent.
         let folder = request.folder?.url
-        if folder != nil, !provider.isDeep {
+        if folder != nil, !provider.capabilities.requiresFolder {
             guard let deep = store.preferredDeepProvider() else { notices.text = "Folder shortcuts need Claude Code or Codex on this Mac."; return false }
             provider = deep
         }
@@ -278,7 +278,7 @@ extension PanelModel {
             notices.text = "Skills run in \(ProviderKind.forSkills.displayName). Switch this chat with /\(ProviderKind.forSkills.slashTokens[0]), or start a new one."
             input.skills = []
         }
-        if store.conversation(id)?.provider.isDeep == true, store.conversation(id)?.folder == nil {
+        if store.conversation(id)?.provider.capabilities.requiresFolder == true, store.conversation(id)?.folder == nil {
             if request.rest.isEmpty && input.pendingAttachments.isEmpty {
                 actions.chooseFolder(id)
                 return false

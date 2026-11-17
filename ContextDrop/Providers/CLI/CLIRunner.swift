@@ -43,7 +43,7 @@ enum CLIRunner {
             }
         }
 
-        fileprivate func write(_ object: [String: Any]) {
+        func write(_ object: [String: Any]) {
             guard var data = try? JSONSerialization.data(withJSONObject: object) else { return }
             data.append(10)
             lock.withLock { try? input?.write(contentsOf: data) }
@@ -54,19 +54,6 @@ enum CLIRunner {
                 try? input?.close()
                 input = nil
             }
-        }
-
-        /// Answers a paused permission request or question. `input` is the tool input to run with (JSON object).
-        func respond(requestID: String, allow: Bool, input: Data = Data(), message: String? = nil) {
-            var response: [String: Any]
-            if allow {
-                let object = (try? JSONSerialization.jsonObject(with: input)) as? [String: Any] ?? [:]
-                response = ["behavior": "allow", "updatedInput": object]
-            } else {
-                response = ["behavior": "deny", "message": message ?? "The user declined this."]
-            }
-            write(["type": "control_response",
-                   "response": ["subtype": "success", "request_id": requestID, "response": response]])
         }
 
         fileprivate func reject(requestID: String) {
@@ -134,6 +121,11 @@ enum CLIRunner {
     /// The user's login-shell PATH: GUI apps don't inherit it, and both CLIs often live in ~/.local/bin.
     static func loginPATH() async -> String {
         await pathCache.get()
+    }
+
+    /// Forgets the cached login PATH, so a CLI installed into a new folder is found without restarting the app.
+    static func resetLoginPATH() async {
+        await pathCache.reset()
     }
 
     static func executable(named name: String) async -> String? {
@@ -292,7 +284,7 @@ enum CLIRunner {
 
     /// Xcode and app hosts inject dynamic-loader and process-control variables that
     /// must not follow the GUI process into an unrelated CLI (or its tool children).
-    private static func cliEnvironment() -> [String: String] {
+    static func cliEnvironment() -> [String: String] {
         ProcessInfo.processInfo.environment.filter { key, _ in
             !key.hasPrefix("DYLD_") && !key.hasPrefix("__XPC_") && !key.hasPrefix("__XCODE_")
                 && !["XPC_FLAGS", "XPC_SERVICE_NAME", "__CFBundleIdentifier", "LLVM_PROFILE_FILE"].contains(key)
@@ -407,6 +399,8 @@ private final class LineStream: @unchecked Sendable {
 private actor PathCache {
     var path: String?
     private var lookup: Task<String?, Never>?
+
+    func reset() { path = nil }
 
     func get() async -> String {
         if let path { return path }

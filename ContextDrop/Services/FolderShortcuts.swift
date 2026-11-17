@@ -178,9 +178,9 @@ struct SlashItem: Identifiable, Equatable {
             commands.append(SlashItem(token: "folder", title: "/folder", subtitle: "Change the working folder", icon: "folder.badge.gearshape"))
         }
         commands.append(SlashItem(token: "room", title: "/room", subtitle: "Open a room for people nearby", icon: "square.grid.2x2"))
-        commands += (ProviderKind.deep + ProviderKind.allCases.filter { !$0.isDeep }).compactMap { provider in
+        commands += (ProviderKind.deep + ProviderKind.allCases.filter { !$0.capabilities.requiresFolder }).compactMap { provider in
             provider.slashTokens.first.map {
-                SlashItem(token: $0, title: "/\($0)", subtitle: provider.slashSubtitle, icon: provider.isDeep ? "terminal" : "bubble.left")
+                SlashItem(token: $0, title: "/\($0)", subtitle: provider.slashSubtitle, icon: provider.capabilities.requiresFolder ? "terminal" : "bubble.left")
             }
         }
         if autoAvailable { commands.append(SlashItem(token: "auto", title: "/auto", subtitle: "Pick a quick answer or your preferred coding CLI", icon: "sparkles")) }

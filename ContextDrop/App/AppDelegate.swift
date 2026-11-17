@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private lazy var roomWindow = RoomWindowController(store: roomStore, reduceMotion: { [weak self] in self?.store.reduceMotion ?? false })
     private lazy var menuBar = MenuBarController(model: panelModel, room: roomStore)
     private(set) lazy var shortcuts = ShortcutSettings(hotKey: HotKey { [weak self] in self?.quickChat.toggle() })
+    private lazy var setup = SetupWindowController(model: SetupModel(store: store, shortcuts: shortcuts))
     private var settingsWindow: NSWindow?
     private var pendingFiles: [URL] = []
     private var launched = false
@@ -37,8 +38,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         panelModel.actions.addFolderShortcut = { [weak self] in self?.addFolderShortcut() }
         panelModel.actions.show = { [weak self] in self?.quickChat.show() }
         panelModel.actions.openRoom = { [weak self] in self?.openRoom() }
+        panelModel.actions.putTabInRoom = { [weak self] id in self?.putTabInRoom(id) }
         panelModel.actions.sendToRoom = { [weak self] message, conversation in self?.sendToRoom(message, from: conversation) }
         panelModel.actions.sendTabToRoom = { [weak self] conversation in self?.sendTabToRoom(conversation) }
+        panelModel.actions.shareRun = { [weak self] conversation, level in self?.shareRun(conversation, level: level) }
+        panelModel.actions.unshareRun = { [weak self] id in self?.unshareRun(id) }
+        panelModel.actions.setShareLevel = { [weak self] id, level in self?.setShareLevel(level, for: id) }
 
         // What counts as "on screen" (never unseen), and which empty chats must survive.
         store.visibleConversations = { [weak self] in
@@ -78,14 +83,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             self.menuBar.refresh()
         }
-        peers.start()
+        // Until setup is done or put off, discovery waits for the Nearby Macs step, so macOS asks for
+        // Local Network access when the screen explains why.
+        if AppDefaults.didFinishSetup || AppDefaults.setupDeferred { peers.start() }
+        setUpSetupWindow()
 
         // The room reads this Mac's Claude Code runs (to summarise the ones put in the room) and
         // opens what is taken home as a private chat. It never sends a private chat on its own.
         roomStore.chats = store
         roomStore.onChange = { [weak self] in
             guard let self else { return }
-            self.panelModel.roomActive = self.roomStore.isActive
+            self.refreshPanelRoom()
             self.roomWindow.roomChanged()
             self.menuBar.refresh()
         }
@@ -115,6 +123,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         for url in pendingFiles { openShareFile(url) }
         pendingFiles.removeAll()
+
+        if !AppDefaults.didFinishSetup && !AppDefaults.setupDeferred { showSetup() }
+    }
+
+    // MARK: Setup
+
+    private func setUpSetupWindow() {
+        let model = setup.model
+        model.onStartDiscovery = { [weak self] in self?.peers.start() }
+        model.onLater = { [weak self] in
+            guard let self else { return }
+            self.setup.close()
+            self.peers.start()
+            self.menuBar.refresh()
+        }
+        model.onFinish = { [weak self] in
+            guard let self else { return }
+            self.setup.close()
+            self.peers.start()
+            self.menuBar.refresh()
+            self.quickChat.show()
+        }
+    }
+
+    /// First launch, Settings › General › Run Setup Again…, or the menu bar's Finish Setup.
+    func showSetup() {
+        quickChat.hide()
+        settingsWindow?.close()
+        setup.show()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -166,6 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             self?.quickChat.show()
         }
         actions.openSettings = { [weak self] in self?.openSettings() }
+        actions.finishSetup = { [weak self] in self?.showSetup() }
         actions.openRoom = { [weak self] in self?.openRoom() }
         actions.dropCurrent = { [weak self] in
             guard let self else { return }
@@ -190,6 +228,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             model.handleDrop(urls, action: .attach, in: model.panelConversationID)
             self.quickChat.show()
+        }
+        // R5 board 6 B: a tab dragged out of its window brings the room up to drop it on.
+        TabDrag.onLeaveSourceWindow = { [weak self] in
+            guard let self, self.roomStore.isActive else { return }
+            self.roomWindow.bringForwardForDrop()
+        }
+        // R5 board 6 B: a tab dropped on the icon goes in the room, as the room chip would put it there.
+        menuBar.onDropTab = { [weak self] id in
+            guard let self, let conversation = self.store.conversation(id) else { return }
+            switch conversation.provider.roomShare {
+            case .liveRun: self.shareRun(conversation, level: self.panelModel.lastShareLevel)
+            case .chatCopy: self.sendTabToRoom(conversation)
+            case .none: break
+            }
         }
     }
 
@@ -233,8 +285,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             roomStore.openRoom()
             roomStore.inviteAllNearby()
         }
-        panelModel.roomActive = roomStore.isActive
+        refreshPanelRoom()
         roomWindow.show()
+    }
+
+    /// The Quick Chat room target works before a room exists as well as while one is active.
+    private func putTabInRoom(_ id: UUID) {
+        guard let conversation = store.conversation(id), conversation.provider.roomShare != .none else { return }
+        if !roomStore.isActive { openRoom() }
+        switch conversation.provider.roomShare {
+        case .chatCopy: sendTabToRoom(conversation)
+        case .liveRun: shareRun(conversation, level: panelModel.lastShareLevel)
+        case .none: break
+        }
+    }
+
+    private func refreshPanelRoom() {
+        let room = roomStore.isActive
+            ? PanelRoom(name: roomStore.room?.name ?? "Room", people: roomStore.presentCount, runs: roomStore.sharedRuns)
+            : nil
+        if panelModel.room != room { panelModel.room = room }
     }
 
     /// "To room" on an answer: only this answer goes in the room; the chat it came from stays private.
@@ -244,23 +314,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         notices.text = "Added to the room. The rest of this chat stays private."
     }
 
-    /// "To room" on a tab: a Claude Code or Codex chat becomes a live run tile that people can follow and send
-    /// follow-ups to (each waits for your OK); an OpenAI chat becomes a chat tile everyone can reply in.
-    /// Either way it keeps running on this Mac.
+    /// "To room" on an OpenAI tab: the chat becomes a chat tile everyone can reply in. It keeps answering from
+    /// this Mac. (Claude Code and Codex tabs go in through the room chip, `shareRun`.)
     private func sendTabToRoom(_ conversation: Conversation) {
-        guard roomStore.isActive else { return }
-        switch conversation.provider.roomShare {
-        case .liveRun:
-            guard roomStore.shareRun(conversation) != nil else { return }
-            notices.text = "This run is in the room. Others can watch and ask to continue it; nothing they send runs until you OK it. Secrets in the log are hidden."
-        case .chatCopy:
-            guard roomStore.shareChat(conversation) != nil else { return }
-            notices.text = "This chat is in the room as a copy. Anyone there can reply; it answers from your Mac."
-        case .none:
-            notices.text = "This chat can’t go in a room."
+        guard roomStore.isActive, conversation.provider.roomShare == .chatCopy,
+              roomStore.shareChat(conversation) != nil else { return }
+        notices.text = "This chat is in the room as a copy. Anyone there can reply; it answers from your Mac."
+        roomWindow.show()
+    }
+
+    /// The room chip (and ⌘⇧R on a run tab): puts a run in the room at `level`. A run already there keeps its
+    /// level. The room window stays shut, since this is used from Quick Chat.
+    private func shareRun(_ conversation: Conversation, level: RunShareLevel) {
+        guard roomStore.isActive, conversation.provider.roomShare == .liveRun else { return }
+        if roomStore.sharedRuns[conversation.id] != nil {
+            notices.text = "This run is already in the room."
             return
         }
-        roomWindow.show()
+        guard roomStore.shareRun(conversation, level: level) != nil else { return }
+        panelModel.lastShareLevel = level
+        notices.text = level == .withLog
+            ? "This run is in the room with its log. Others can ask to continue it; nothing they send runs until you OK it. Secrets in the log are hidden."
+            : "This run is in the room: its steps and changed files. Others can ask to continue it; nothing they send runs until you OK it."
+    }
+
+    /// "Take out of room" on the chip: the tile goes for everyone; the run carries on here.
+    private func unshareRun(_ conversationID: UUID) {
+        guard roomStore.sharedRuns[conversationID] != nil else { return }
+        roomStore.unshareRun(conversationID: conversationID)
+        notices.text = "This run is out of the room. It keeps going on your Mac."
+    }
+
+    /// "Show live log" on the chip.
+    private func setShareLevel(_ level: RunShareLevel, for conversationID: UUID) {
+        guard let current = roomStore.sharedRuns[conversationID], current != level else { return }
+        roomStore.setShareLevel(level, for: conversationID)
+        panelModel.lastShareLevel = level
+        notices.text = Self.levelNotice(level)
+    }
+
+    private static func levelNotice(_ level: RunShareLevel) -> String {
+        switch level {
+        case .withLog: "The room now sees this run’s log too. Secrets in it are hidden."
+        case .steps: "The room no longer gets this run’s log."
+        }
     }
 
     // MARK: Settings
@@ -283,7 +380,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let maxHeight = SettingsView.maxHeight()
             let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             window.title = SettingsView.windowTitle
-            let hosting = NSHostingView(rootView: SettingsView(store: store, shortcuts: shortcuts))
+            let hosting = NSHostingView(rootView: SettingsView(store: store, shortcuts: shortcuts,
+                                                             runSetup: { [weak self] in self?.showSetup() }))
             hosting.sizingOptions = [] // the window's own limits below are the single source of truth
             window.contentView = hosting
             window.isReleasedWhenClosed = false
